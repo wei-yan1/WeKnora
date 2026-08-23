@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/datasource"
@@ -19,21 +20,46 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	secutils "github.com/Tencent/WeKnora/internal/utils"
+	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // DataSourceService implements the DataSourceService interface
 type DataSourceService struct {
-	dsRepo            interfaces.DataSourceRepository
-	syncLogRepo       interfaces.SyncLogRepository
-	knowledgeService  interfaces.KnowledgeService
-	kbService         interfaces.KnowledgeBaseService
-	taskEnqueuer      interfaces.TaskEnqueuer
-	connectorRegistry *datasource.ConnectorRegistry
-	scheduler         *datasource.Scheduler
-	tenantRepo        interfaces.TenantRepository
-	tagService        interfaces.KnowledgeTagService
-	audit             interfaces.AuditLogService
+	dsRepo              interfaces.DataSourceRepository
+	syncLogRepo         interfaces.SyncLogRepository
+	knowledgeService    interfaces.KnowledgeService
+	kbService           interfaces.KnowledgeBaseService
+	taskEnqueuer        interfaces.TaskEnqueuer
+	connectorRegistry   *datasource.ConnectorRegistry
+	connectorResolver   datasource.ConnectorResolver
+	scheduler           *datasource.Scheduler
+	tenantRepo          interfaces.TenantRepository
+	tagService          interfaces.KnowledgeTagService
+	audit               interfaces.AuditLogService
+	syncCoordinator     *datasource.SyncCoordinator
+	syncCoordinatorOnce sync.Once
+	syncDispatcher      *datasource.SyncOutboxDispatcher
+	syncDispatcherOnce  sync.Once
+}
+
+func (s *DataSourceService) dispatcher() *datasource.SyncOutboxDispatcher {
+	s.syncDispatcherOnce.Do(func() {
+		if s.syncDispatcher == nil {
+			s.syncDispatcher = datasource.NewSyncOutboxDispatcher(s.syncLogRepo, s.taskEnqueuer)
+		}
+	})
+	return s.syncDispatcher
+}
+
+func (s *DataSourceService) coordinator() *datasource.SyncCoordinator {
+	s.syncCoordinatorOnce.Do(func() {
+		if s.syncCoordinator == nil {
+			s.syncCoordinator = datasource.NewSyncCoordinator(nil)
+		}
+	})
+	return s.syncCoordinator
 }
 
 // NewDataSourceService creates a new data source service
@@ -48,7 +74,11 @@ func NewDataSourceService(
 	tenantRepo interfaces.TenantRepository,
 	tagService interfaces.KnowledgeTagService,
 	audit interfaces.AuditLogService,
+	syncCoordinator *datasource.SyncCoordinator,
 ) interfaces.DataSourceService {
+	if syncCoordinator == nil {
+		syncCoordinator = datasource.NewSyncCoordinator(nil)
+	}
 	return &DataSourceService{
 		dsRepo:            dsRepo,
 		syncLogRepo:       syncLogRepo,
@@ -56,10 +86,13 @@ func NewDataSourceService(
 		kbService:         kbService,
 		taskEnqueuer:      taskEnqueuer,
 		connectorRegistry: connectorRegistry,
+		connectorResolver: datasource.NewRegistryResolver(connectorRegistry),
 		scheduler:         scheduler,
 		tenantRepo:        tenantRepo,
 		tagService:        tagService,
 		audit:             audit,
+		syncCoordinator:   syncCoordinator,
+		syncDispatcher:    datasource.NewSyncOutboxDispatcher(syncLogRepo, taskEnqueuer),
 	}
 }
 
@@ -76,12 +109,6 @@ func (s *DataSourceService) CreateDataSource(ctx context.Context, ds *types.Data
 	}
 	if kb.TenantID != ds.TenantID {
 		return nil, datasource.ErrKnowledgeBaseNotFound
-	}
-
-	// Validate connector type
-	_, err = s.connectorRegistry.Get(ds.Type)
-	if err != nil {
-		return nil, err
 	}
 
 	// Validate configuration
@@ -354,17 +381,17 @@ func (s *DataSourceService) ValidateConnection(ctx context.Context, dsID string)
 		return err
 	}
 
-	// Get connector
-	connector, err := s.connectorRegistry.Get(ds.Type)
-	if err != nil {
-		return err
-	}
-
 	// Parse configuration
 	config, err := ds.ParseConfig()
 	if err != nil {
 		return datasource.ErrInvalidConfig
 	}
+	lease, err := s.resolveConnector(ctx, ds, config)
+	if err != nil {
+		return err
+	}
+	defer lease.Close()
+	connector := lease.Connector()
 
 	// Validate connection
 	if err := connector.Validate(ctx, config); err != nil {
@@ -396,17 +423,17 @@ func (s *DataSourceService) ListAvailableResources(
 		return nil, err
 	}
 
-	// Get connector
-	connector, err := s.connectorRegistry.Get(ds.Type)
-	if err != nil {
-		return nil, err
-	}
-
 	// Parse configuration
 	config, err := ds.ParseConfig()
 	if err != nil {
 		return nil, datasource.ErrInvalidConfig
 	}
+	lease, err := s.resolveConnector(ctx, ds, config)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Close()
+	connector := lease.Connector()
 
 	// List resources
 	resources, err := connector.ListResources(ctx, config, parentID)
@@ -432,15 +459,16 @@ func (s *DataSourceService) ResolveResourceAncestors(
 		return nil, err
 	}
 
-	connector, err := s.connectorRegistry.Get(ds.Type)
-	if err != nil {
-		return nil, err
-	}
-
 	config, err := ds.ParseConfig()
 	if err != nil {
 		return nil, datasource.ErrInvalidConfig
 	}
+	lease, err := s.resolveConnector(ctx, ds, config)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Close()
+	connector := lease.Connector()
 
 	ancestors, err := connector.ResolveResourceAncestors(ctx, config, resourceIDs)
 	if err != nil {
@@ -463,21 +491,31 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
 		ds.Status != types.DataSourceStatusPaused {
 		return nil, datasource.ErrDataSourceNotActive
 	}
-
-	// Create sync log
-	syncLog := &types.SyncLog{
-		DataSourceID: dsID,
-		TenantID:     ds.TenantID,
-		Status:       types.SyncLogStatusRunning,
-		StartedAt:    time.Now().UTC(),
-	}
-
-	if err := s.syncLogRepo.Create(ctx, syncLog); err != nil {
-		logger.Errorf(ctx, "failed to create sync log: %v", err)
+	triggerLock, err := s.coordinator().TryAcquireTrigger(ctx, dsID)
+	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if releaseErr := triggerLock.Release(); releaseErr != nil {
+			logger.Errorf(context.Background(), "release data source trigger lock: %v", releaseErr)
+		}
+	}()
+	ctx = triggerLock.Context()
+	if running, err := s.syncLogRepo.HasRunningSync(ctx, dsID); err != nil {
+		return nil, err
+	} else if running {
+		return nil, datasource.ErrSyncAlreadyRunning
+	}
 
-	// Enqueue sync task
+	// Persist the queue intent first. The pending SyncLog doubles as a durable
+	// outbox row, closing the DB-commit→Asynq-enqueue crash window.
+	syncLog := &types.SyncLog{
+		ID:           uuid.NewString(),
+		DataSourceID: dsID,
+		TenantID:     ds.TenantID,
+		Status:       types.SyncLogStatusPending,
+		StartedAt:    time.Now().UTC(),
+	}
 	payload := &types.DataSourceSyncPayload{
 		DataSourceID: dsID,
 		TenantID:     ds.TenantID,
@@ -487,34 +525,30 @@ func (s *DataSourceService) ManualSync(ctx context.Context, dsID string) (*types
 		Trigger:      "manual",
 	}
 	langfuse.InjectTracing(ctx, payload)
-
-	payloadJSON, _ := json.Marshal(payload)
-	task := asynq.NewTask(types.TypeDataSourceSync, payloadJSON,
-		asynq.Queue(types.QueueSync), asynq.MaxRetry(5), asynq.Timeout(2*time.Hour))
-
-	info, err := s.taskEnqueuer.Enqueue(task)
+	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
-		logger.Errorf(ctx, "failed to enqueue sync task: %v", err)
-		syncLog.Status = types.SyncLogStatusFailed
-		syncLog.FinishedAt = timePtr(time.Now().UTC())
-		syncLog.ErrorMessage = err.Error()
-		_ = s.syncLogRepo.Update(ctx, syncLog)
-		if ds.Status != types.DataSourceStatusPaused {
-			ds.Status = types.DataSourceStatusError
-		}
-		ds.ErrorMessage = fmt.Sprintf("Failed to enqueue sync: %v", err)
-		_ = s.dsRepo.Update(ctx, ds)
-		recordKBActivity(ctx, s.audit, ds.TenantID, ds.KnowledgeBaseID, types.AuditActionDataSourceSyncFailed,
-			"data_source", ds.ID, types.AuditOutcomeFailed,
-			map[string]any{"name": ds.Name, "type": ds.Type, "sync_log_id": syncLog.ID, "trigger": "manual"})
 		return nil, err
+	}
+	syncLog.TaskID = datasource.SyncTaskID(dsID, syncLog.ID)
+	syncLog.TaskPayload = types.JSON(payloadJSON)
+	if err := s.syncLogRepo.Create(ctx, syncLog); err != nil {
+		logger.Errorf(ctx, "failed to create sync outbox row: %v", err)
+		return nil, err
+	}
+
+	info, dispatchErr := s.dispatcher().Dispatch(ctx, syncLog)
+	if dispatchErr != nil {
+		// The DB row is durable and the background dispatcher will retry. Do not
+		// report the sync as lost or terminal merely because Redis is transiently down.
+		logger.Warnf(ctx, "sync persisted but immediate queue dispatch failed: ds=%s log=%s err=%v", dsID, syncLog.ID, dispatchErr)
 	}
 
 	logger.Infof(ctx, "sync task enqueued: ds=%s syncLog=%s", dsID, syncLog.ID)
 	recordKBActivity(ctx, s.audit, ds.TenantID, ds.KnowledgeBaseID, types.AuditActionDataSourceSyncStarted,
 		"data_source", ds.ID, types.AuditOutcomeAccepted,
 		map[string]any{"name": ds.Name, "type": ds.Type, "sync_log_id": syncLog.ID,
-			"task_id": info.ID, "trigger": "manual", "processing_status": "pending"})
+			"task_id": syncLog.TaskID, "trigger": "manual", "processing_status": "pending",
+			"dispatched": info != nil && dispatchErr == nil})
 	return syncLog, nil
 }
 
@@ -584,12 +618,38 @@ func (s *DataSourceService) GetSyncLog(ctx context.Context, syncLogID string) (*
 }
 
 // ProcessSync handles the actual sync operation (called by asynq task)
-func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) error {
+func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) (resultErr error) {
 	var payload types.DataSourceSyncPayload
 	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
 		logger.Errorf(ctx, "failed to unmarshal sync payload: %v", err)
 		return err
 	}
+	executionLock, err := s.coordinator().TryAcquireExecution(ctx, payload.DataSourceID)
+	if err != nil {
+		if errors.Is(err, datasource.ErrSyncAlreadyRunning) {
+			if syncLog, findErr := s.syncLogRepo.FindByID(ctx, payload.SyncLogID); findErr == nil && syncLog != nil {
+				// A pending log belongs to a distinct trigger that lost the
+				// execution race and can be canceled. A running log may be a
+				// duplicate delivery of the SAME Asynq task; never overwrite the
+				// original worker's log while it is still executing.
+				if syncLog.Status == types.SyncLogStatusPending {
+					syncLog.Status = types.SyncLogStatusCanceled
+					syncLog.FinishedAt = timePtr(time.Now().UTC())
+					syncLog.ErrorMessage = err.Error()
+					_ = s.syncLogRepo.Update(ctx, syncLog)
+				}
+			}
+			return nil
+		}
+		return err
+	}
+	defer func() {
+		if releaseErr := executionLock.Release(); releaseErr != nil {
+			logger.Errorf(context.Background(), "release data source sync lock: %v", releaseErr)
+			resultErr = errors.Join(resultErr, releaseErr)
+		}
+	}()
+	ctx = executionLock.Context()
 	ctx = payload.Initiator.Apply(ctx)
 	taskID, _ := asynq.GetTaskID(ctx)
 	ctx = withKBActivityTask(ctx, taskID, payload.Trigger)
@@ -615,6 +675,16 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 		logger.Errorf(ctx, "failed to get sync log: %v", err)
 		return nil
 	}
+	if syncLog.Status != types.SyncLogStatusPending && syncLog.Status != types.SyncLogStatusRunning {
+		logger.Infof(ctx, "data source sync log is already terminal, skipping task: log=%s status=%s", syncLog.ID, syncLog.Status)
+		return nil
+	}
+	if syncLog.Status == types.SyncLogStatusPending {
+		syncLog.Status = types.SyncLogStatusRunning
+		if err := s.syncLogRepo.Update(ctx, syncLog); err != nil {
+			return fmt.Errorf("mark data source sync running: %w", err)
+		}
+	}
 
 	kb, kbErr := s.kbService.GetKnowledgeBaseByID(ctx, ds.KnowledgeBaseID)
 	if kbErr != nil {
@@ -628,22 +698,6 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 	}
 
 	wasPaused := ds.Status == types.DataSourceStatusPaused
-
-	// Get connector
-	connector, err := s.connectorRegistry.Get(ds.Type)
-	if err != nil {
-		logger.Errorf(ctx, "connector not found: type=%s", ds.Type)
-		syncLog.Status = types.SyncLogStatusFailed
-		syncLog.FinishedAt = timePtr(time.Now().UTC())
-		syncLog.ErrorMessage = fmt.Sprintf("Connector not found: %s", ds.Type)
-		_ = s.syncLogRepo.Update(ctx, syncLog)
-		if !wasPaused {
-			ds.Status = types.DataSourceStatusError
-		}
-		ds.ErrorMessage = syncLog.ErrorMessage
-		_ = s.dsRepo.Update(ctx, ds)
-		return err
-	}
 
 	// Parse configuration
 	config, err := ds.ParseConfig()
@@ -663,6 +717,26 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 	// Surface the KB's multimodal/VLM state to the connector so it only extracts
 	// embedded images for OCR when the KB can actually ingest them (never persisted).
 	config.MultimodalEnabled = kb.IsMultimodalEnabled()
+
+	// Resolve through the instance-aware factory. Built-in connectors are
+	// returned as static leases; external plugins receive the datasource scope
+	// and are free to bind a runtime for this invocation.
+	lease, err := s.resolveConnector(ctx, ds, config)
+	if err != nil {
+		logger.Errorf(ctx, "connector not found: type=%s: %v", ds.Type, err)
+		syncLog.Status = types.SyncLogStatusFailed
+		syncLog.FinishedAt = timePtr(time.Now().UTC())
+		syncLog.ErrorMessage = fmt.Sprintf("Connector not found: %s", ds.Type)
+		_ = s.syncLogRepo.Update(ctx, syncLog)
+		if !wasPaused {
+			ds.Status = types.DataSourceStatusError
+		}
+		ds.ErrorMessage = syncLog.ErrorMessage
+		_ = s.dsRepo.Update(ctx, ds)
+		return err
+	}
+	defer lease.Close()
+	connector := lease.Connector()
 
 	// Streaming path: connectors that support it interleave fetch→ingest→
 	// checkpoint so a large sync bounds memory and resumes after a timeout
@@ -801,6 +875,9 @@ func (s *DataSourceService) ProcessSync(ctx context.Context, task *asynq.Task) e
 // non-fatal: the sync proceeds untagged.
 func (s *DataSourceService) resolveAutoTagIDs(ctx context.Context, ds *types.DataSource) []string {
 	autoTagIDs := []string{}
+	if s.tagService == nil || ds == nil {
+		return autoTagIDs
+	}
 	if autoTag, tagErr := s.tagService.FindOrCreateTagByName(ctx, ds.KnowledgeBaseID, ds.Name); tagErr != nil {
 		logger.Warnf(ctx, "failed to find/create auto-tag %q: %v (proceeding without tag)", ds.Name, tagErr)
 	} else if autoTag != nil {
@@ -1079,6 +1156,11 @@ func (s *DataSourceService) processSyncStreaming(
 
 	resultJSON, _ := result.ToJSON()
 	if err := allFetchedItemsFailedError(result); err != nil {
+		// A streaming plugin may have emitted its final checkpoint even though
+		// every fetched item failed during local ingestion. That cursor would
+		// make the next incremental run skip those documents forever, so discard
+		// it and let the repaired pipeline retry the complete source.
+		ds.LastSyncCursor = nil
 		logger.Errorf(ctx, "streaming sync failed while processing fetched items: %v", err)
 		s.updateSyncRunResult(ctx, ds, syncLog, result, resultJSON, types.SyncLogStatusFailed, err.Error(), wasPaused)
 		return err
@@ -1194,14 +1276,16 @@ func allFetchedItemsFailedError(result *types.SyncResult) error {
 
 // ValidateCredentials tests connectivity using raw credentials without persisting anything.
 func (s *DataSourceService) ValidateCredentials(ctx context.Context, connectorType string, credentials map[string]interface{}) error {
-	connector, err := s.connectorRegistry.Get(connectorType)
-	if err != nil {
-		return err
-	}
 	config := &types.DataSourceConfig{
 		Type:        connectorType,
 		Credentials: credentials,
 	}
+	lease, err := s.resolveConnector(ctx, nil, config)
+	if err != nil {
+		return err
+	}
+	defer lease.Close()
+	connector := lease.Connector()
 	if err := connector.Validate(ctx, config); err != nil {
 		return err
 	}
@@ -1212,17 +1296,48 @@ func (s *DataSourceService) ValidateCredentials(ctx context.Context, connectorTy
 // Helper functions
 
 func (s *DataSourceService) validateDataSourceConfig(ctx context.Context, ds *types.DataSource) error {
-	connector, err := s.connectorRegistry.Get(ds.Type)
-	if err != nil {
-		return err
-	}
-
 	config, err := ds.ParseConfig()
 	if err != nil {
 		return datasource.ErrInvalidConfig
 	}
+	lease, err := s.resolveConnector(ctx, ds, config)
+	if err != nil {
+		return err
+	}
+	defer lease.Close()
+	connector := lease.Connector()
 
 	return connector.Validate(ctx, config)
+}
+
+func (s *DataSourceService) resolveConnector(ctx context.Context, ds *types.DataSource, config *types.DataSourceConfig) (datasource.ConnectorLease, error) {
+	if config == nil {
+		return nil, datasource.ErrInvalidConfig
+	}
+	resolver := s.connectorResolver
+	if resolver == nil {
+		if s.connectorRegistry == nil {
+			return nil, datasource.ErrConnectorNotFound
+		}
+		resolver = datasource.NewRegistryResolver(s.connectorRegistry)
+	}
+	scope := datasource.ConnectorScope{}
+	if ds != nil {
+		scope.TenantID = ds.TenantID
+		scope.KnowledgeBaseID = ds.KnowledgeBaseID
+		scope.DataSourceID = ds.ID
+	}
+	if taskID, ok := asynq.GetTaskID(ctx); ok && taskID != "" {
+		scope.OperationID = taskID
+	} else if requestID, ok := types.RequestIDFromContext(ctx); ok && requestID != "" {
+		scope.OperationID = requestID
+	} else {
+		scope.OperationID = uuid.NewString()
+	}
+	if spanContext := trace.SpanContextFromContext(ctx); spanContext.IsValid() {
+		scope.TraceID = spanContext.TraceID().String()
+	}
+	return resolver.Resolve(ctx, config.Type, scope, config)
 }
 
 // ingestItem writes a single FetchedItem into the knowledge base.

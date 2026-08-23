@@ -746,6 +746,7 @@ export default {
       failed: 'ошибок'
     },
     logStatus: {
+      pending: 'В очереди',
       running: 'Синхронизация',
       success: 'Успешно',
       partial: 'Частично',

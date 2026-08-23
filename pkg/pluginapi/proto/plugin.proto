@@ -1,0 +1,129 @@
+syntax = "proto3";
+
+package weknora.plugin.v1;
+
+option go_package = "github.com/Tencent/WeKnora/pkg/pluginapi/proto;pluginproto";
+
+import "google/protobuf/struct.proto";
+
+message HandshakeRequest {}
+message HandshakeResponse {
+  string protocol_version = 1;
+  string plugin_id = 2;
+  repeated string capabilities = 3;
+}
+message HealthRequest {}
+message HealthResponse {
+  string state = 1;
+  string message = 2;
+}
+message Cursor {
+  bytes data = 1;
+  string content_type = 2;
+}
+message DataSourceRequest {
+  google.protobuf.Struct config = 1;
+  repeated string resource_ids = 2;
+  string parent_id = 3;
+  Cursor cursor = 4;
+}
+message Resource {
+  string external_id = 1;
+  string name = 2;
+  string parent_id = 3;
+  string type = 4;
+  map<string, string> metadata = 5;
+}
+message FetchedItem {
+  string external_id = 1;
+  string title = 2;
+  bytes content = 3;
+  string url = 4;
+  string mime_type = 5;
+  string updated_at = 6;
+  map<string, string> metadata = 7;
+  bool is_deleted = 8;
+  bool replaces_subtree = 9;
+  repeated string subtree_keep = 10;
+}
+message DataSourceResponse {
+  string error = 1;
+  repeated Resource resources = 2;
+  repeated string ancestors = 3;
+  repeated FetchedItem items = 4;
+  Cursor cursor = 5;
+  repeated string warnings = 6;
+}
+message ParserRequest {
+  bytes file_content = 1;
+  string file_name = 2;
+  string file_type = 3;
+  string url = 4;
+  string title = 5;
+  string parser_engine = 6;
+  string request_id = 7;
+  map<string, string> parser_engine_overrides = 8;
+}
+message ParserImageRef {
+  string filename = 1;
+  string original_ref = 2;
+  string mime_type = 3;
+  string storage_key = 4;
+  bytes image_data = 5;
+  bool is_original = 6;
+}
+message ParserResponse {
+  string markdown_content = 1;
+  repeated ParserImageRef image_refs = 2;
+  string image_dir_path = 3;
+  map<string, string> metadata = 4;
+  string error = 5;
+  bool is_audio = 6;
+  bytes audio_data = 7;
+}
+message WebSearchRequest {
+  string query = 1;
+  int32 max_results = 2;
+  bool include_date = 3;
+  string api_key = 4;
+  string engine_id = 5;
+  string base_url = 6;
+  string proxy_url = 7;
+  map<string, string> extra_config = 8;
+}
+message WebSearchResult {
+  string title = 1;
+  string url = 2;
+  string snippet = 3;
+  string content = 4;
+  string source = 5;
+  string published_at = 6;
+}
+message WebSearchResponse {
+  repeated WebSearchResult results = 1;
+  string error = 2;
+}
+service DataSourcePlugin {
+  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Validate(DataSourceRequest) returns (DataSourceResponse);
+  rpc ListResources(DataSourceRequest) returns (DataSourceResponse);
+  rpc ResolveResourceAncestors(DataSourceRequest) returns (DataSourceResponse);
+  rpc FetchAll(DataSourceRequest) returns (DataSourceResponse);
+  rpc FetchIncremental(DataSourceRequest) returns (DataSourceResponse);
+  // Streaming variants keep item batches bounded and carry a cursor in each
+  // response so the host can persist progress during a long sync. The unary
+  // methods above remain for v1 compatibility.
+  rpc FetchAllStream(DataSourceRequest) returns (stream DataSourceResponse);
+  rpc FetchIncrementalStream(DataSourceRequest) returns (stream DataSourceResponse);
+}
+service ParserPlugin {
+  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Parse(ParserRequest) returns (ParserResponse);
+}
+service WebSearchPlugin {
+  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Search(WebSearchRequest) returns (WebSearchResponse);
+}

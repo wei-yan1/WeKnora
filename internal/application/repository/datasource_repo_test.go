@@ -20,6 +20,54 @@ func setupDataSourceRepoTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
+func TestSyncLogRepositoryDispatchStateTransitionsAreConditional(t *testing.T) {
+	db := setupDataSourceRepoTestDB(t)
+	repo := NewSyncLogRepository(db).(*SyncLogRepository)
+	ctx := context.Background()
+
+	pending := &types.SyncLog{
+		ID:                "outbox-pending",
+		DataSourceID:      "ds-1",
+		TenantID:          1,
+		Status:            types.SyncLogStatusPending,
+		TaskID:            "dssync:ds-1:outbox-pending",
+		DispatchAttempts:  2,
+		LastDispatchError: "old error",
+	}
+	terminal := &types.SyncLog{
+		ID:           "outbox-terminal",
+		DataSourceID: "ds-1",
+		TenantID:     1,
+		Status:       types.SyncLogStatusCanceled,
+		TaskID:       "dssync:ds-1:outbox-terminal",
+	}
+	require.NoError(t, repo.Create(ctx, pending))
+	require.NoError(t, repo.Create(ctx, terminal))
+
+	dispatchedAt := time.Now().UTC()
+	require.NoError(t, repo.MarkDispatched(ctx, pending.ID, dispatchedAt))
+
+	// A late queue failure from another dispatcher must not make the already
+	// delivered row eligible for another attempt.
+	retryAt := dispatchedAt.Add(time.Minute)
+	require.NoError(t, repo.MarkDispatchFailure(ctx, pending.ID, 99, retryAt, "late failure"))
+
+	var storedPending, storedTerminal types.SyncLog
+	require.NoError(t, db.First(&storedPending, "id = ?", pending.ID).Error)
+	require.NoError(t, db.First(&storedTerminal, "id = ?", terminal.ID).Error)
+	assert.NotNil(t, storedPending.DispatchedAt)
+	assert.Equal(t, 2, storedPending.DispatchAttempts)
+	assert.Empty(t, storedPending.LastDispatchError)
+	assert.Nil(t, storedPending.NextDispatchAt)
+
+	// A terminal row can still need the delivery marker when the worker raced
+	// ahead of the producer. Marking delivery does not change its status.
+	require.NoError(t, repo.MarkDispatched(ctx, terminal.ID, dispatchedAt))
+	var reloadedTerminal types.SyncLog
+	require.NoError(t, db.First(&reloadedTerminal, "id = ?", terminal.ID).Error)
+	assert.NotNil(t, reloadedTerminal.DispatchedAt)
+}
+
 func TestDataSourceRepositoryUpdateSyncStateClearsErrorMessage(t *testing.T) {
 	db := setupDataSourceRepoTestDB(t)
 	repo := NewDataSourceRepository(db)

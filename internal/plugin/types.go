@@ -1,0 +1,107 @@
+package plugin
+
+// Package plugin contains the provider-independent control plane for WeKnora
+// extensions. Connector-specific protocols are deliberately kept out of this
+// package so the lifecycle manager can manage every extension type uniformly.
+
+import "time"
+
+const (
+	APIVersionV1        = "weknora.plugin/v1"
+	ProtocolVersionV1   = "v1"
+	ExtensionDataSource = "datasource"
+	ExtensionParser     = "parser"
+	ExtensionSearch     = "search"
+	ExtensionModel      = "model"
+	ExtensionRetriever  = "retriever"
+)
+
+// NetworkPolicy describes the egress boundary the host must enforce for a
+// plugin. "none" is the safe default; "egress" means a controlled broker or
+// sandbox policy; "allowlist" restricts destinations to AllowedDestinations.
+type NetworkPolicy string
+
+const (
+	NetworkNone      NetworkPolicy = "none"
+	NetworkEgress    NetworkPolicy = "egress"
+	NetworkAllowlist NetworkPolicy = "allowlist"
+)
+
+// Permissions are declarative input to the runtime sandbox. A manifest is not
+// trusted merely because it declares a permission: the runtime must enforce it.
+type Permissions struct {
+	Network             NetworkPolicy `json:"network" yaml:"network"`
+	ReadPaths           []string      `json:"read_paths,omitempty" yaml:"read_paths,omitempty"`
+	WritePaths          []string      `json:"write_paths,omitempty" yaml:"write_paths,omitempty"`
+	AllowedDestinations []string      `json:"allowed_destinations,omitempty" yaml:"allowed_destinations,omitempty"`
+	Secrets             []string      `json:"secrets,omitempty" yaml:"secrets,omitempty"`
+	// Data describes the host data scope the plugin is intended to handle.
+	// "self" means the tenant/knowledge-base/data-source associated with the
+	// current invocation; explicit IDs may be used by an administrator when a
+	// plugin is intentionally restricted to a fixed set of resources.
+	Data *DataPermissions `json:"data,omitempty" yaml:"data,omitempty"`
+}
+
+type DataPermissions struct {
+	Tenants        []string `json:"tenants,omitempty" yaml:"tenants,omitempty"`
+	KnowledgeBases []string `json:"knowledge_bases,omitempty" yaml:"knowledge_bases,omitempty"`
+	DataSources    []string `json:"data_sources,omitempty" yaml:"data_sources,omitempty"`
+}
+
+type ConfigField struct {
+	Key         string   `json:"key" yaml:"key"`
+	Type        string   `json:"type" yaml:"type"`
+	Description string   `json:"description,omitempty" yaml:"description,omitempty"`
+	Required    bool     `json:"required,omitempty" yaml:"required,omitempty"`
+	Secret      bool     `json:"secret,omitempty" yaml:"secret,omitempty"`
+	Default     any      `json:"default,omitempty" yaml:"default,omitempty"`
+	Enum        []string `json:"enum,omitempty" yaml:"enum,omitempty"`
+}
+
+// Manifest is the stable package contract. Entrypoint is interpreted by the
+// selected runtime (for example a process path or OCI image); lifecycle code
+// never embeds a plugin ID-specific branch.
+type Manifest struct {
+	APIVersion      string        `json:"api_version" yaml:"api_version"`
+	ID              string        `json:"id" yaml:"id"`
+	Name            string        `json:"name" yaml:"name"`
+	Version         string        `json:"version" yaml:"version"`
+	ExtensionType   string        `json:"extension_type" yaml:"extension_type"`
+	ProtocolVersion string        `json:"protocol_version" yaml:"protocol_version"`
+	WeKnoraVersion  string        `json:"weknora_version" yaml:"weknora_version"`
+	Entrypoint      string        `json:"entrypoint,omitempty" yaml:"entrypoint,omitempty"`
+	Config          []ConfigField `json:"config,omitempty" yaml:"config,omitempty"`
+	// ConfigSchema is a JSON-Schema-like object used to validate request
+	// configuration before it crosses the plugin boundary. Config remains
+	// supported for concise manifests and is converted into this schema when
+	// ConfigSchema is omitted.
+	ConfigSchema map[string]any `json:"config_schema,omitempty" yaml:"config_schema,omitempty"`
+	Permissions  Permissions    `json:"permissions" yaml:"permissions"`
+	Capabilities []string       `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
+	Metadata     map[string]any `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+}
+
+type HealthState string
+
+const (
+	StateDiscovered HealthState = "discovered"
+	StateStarting   HealthState = "starting"
+	StateRunning    HealthState = "running"
+	StateDraining   HealthState = "draining"
+	StateDegraded   HealthState = "degraded"
+	StateUnhealthy  HealthState = "unhealthy"
+	StateStopped    HealthState = "stopped"
+	StateFailed     HealthState = "failed"
+)
+
+type HealthStatus struct {
+	State      HealthState `json:"state"`
+	Message    string      `json:"message,omitempty"`
+	CheckedAt  time.Time   `json:"checked_at"`
+	Generation uint64      `json:"generation"`
+}
+
+type PluginInfo struct {
+	Manifest Manifest     `json:"manifest"`
+	State    HealthStatus `json:"state"`
+}

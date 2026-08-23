@@ -1,0 +1,30 @@
+api_version: weknora.plugin/v1
+id: your-org.example-datasource
+name: Example Data Source
+version: 0.1.0
+extension_type: datasource
+protocol_version: v1
+weknora_version: ">=1.0 <2.0"
+permissions:
+  network: none
+  data:
+    tenants: [self]
+    knowledge_bases: [self]
+    data_sources: [self]
+config:
+  - key: endpoint
+    type: string
+    required: true
+    description: Connector-specific endpoint or local path
+config_schema:
+  type: object
+  properties:
+    settings:
+      type: object
+      required: [endpoint]
+      additionalProperties: false
+      properties:
+        endpoint:
+          type: string
+          description: Connector-specific endpoint or local path
+capabilities: [incremental]

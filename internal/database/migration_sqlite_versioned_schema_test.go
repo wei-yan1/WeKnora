@@ -24,16 +24,17 @@ var versionedSQLiteTables = []string{
 // versionedSQLiteColumns maps each existing table to the columns that the
 // versioned migrations add and the SQLite baseline was missing.
 var versionedSQLiteColumns = map[string][]string{
-	"tenants":            {"api_principal_config"},           // 000064
-	"users":              {"is_system_admin"},                // 000053
-	"knowledges":         {"pending_subtasks_count"},         // 000056
-	"messages":           {"attachments"},                    // 000034
-	"tenant_invitations": {"token", "accepted_count"},        // 000054
-	"embed_channels":     {"allow_memory"},                   // 000060
-	"mcp_oauth_tokens":   {"principal_type", "principal_id"}, // 000064
+	"tenants":            {"api_principal_config"},                                                                                     // 000064
+	"users":              {"is_system_admin"},                                                                                          // 000053
+	"knowledges":         {"pending_subtasks_count"},                                                                                   // 000056
+	"messages":           {"attachments"},                                                                                              // 000034
+	"tenant_invitations": {"token", "accepted_count"},                                                                                  // 000054
+	"embed_channels":     {"allow_memory"},                                                                                             // 000060
+	"mcp_oauth_tokens":   {"principal_type", "principal_id"},                                                                           // 000064
+	"sync_logs":          {"task_id", "task_payload", "dispatched_at", "dispatch_attempts", "next_dispatch_at", "last_dispatch_error"}, // 000085
 }
 
-const expectedSQLiteMigrationVersion = 11
+const expectedSQLiteMigrationVersion = 12
 
 func TestSQLiteMigrationsCreateVersionedSchema(t *testing.T) {
 	repoRoot := sqliteRepoRoot(t)
