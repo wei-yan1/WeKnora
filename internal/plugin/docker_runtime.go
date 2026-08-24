@@ -24,21 +24,22 @@ import (
 // does not need Docker socket access through this type; production deployments
 // should invoke it from a constrained runtime-agent when Docker privileges are
 // separated from the API process.
+//
+// DockerRuntime depends only on the shared control-plane client
+// (pluginapi.PluginControlClient), never on type-specific protocol clients.
 type DockerRuntime struct {
 	Manifest     Manifest
 	Image        string
 	DockerBinary string
 	SocketDir    string
 
-	mu              sync.RWMutex
-	cmd             *exec.Cmd
-	conn            *grpc.ClientConn
-	client          pluginapi.DataSourcePluginClient
-	parserClient    pluginapi.ParserPluginClient
-	webSearchClient pluginapi.WebSearchPluginClient
-	socket          string
-	ownsSocketDir   bool
-	AuditSink       AuditSink
+	mu            sync.RWMutex
+	cmd           *exec.Cmd
+	conn          *grpc.ClientConn
+	controlClient pluginapi.PluginControlClient
+	socket        string
+	ownsSocketDir bool
+	AuditSink     AuditSink
 }
 
 func NewDockerRuntime(manifest Manifest, image string) *DockerRuntime {
@@ -107,44 +108,22 @@ func (r *DockerRuntime) Start(ctx context.Context) error {
 		_ = cmd.Wait()
 		return fmt.Errorf("connect docker plugin: %w", err)
 	}
-	client := pluginapi.NewDataSourcePluginClient(conn)
-	parserClient := pluginapi.NewParserPluginClient(conn)
-	webSearchClient := pluginapi.NewWebSearchPluginClient(conn)
-	var handshake pluginapi.HandshakeResponse
-	var handshakeWire *pluginproto.HandshakeResponse
-	if r.Manifest.ExtensionType == ExtensionParser {
-		handshakeWire, err = parserClient.Handshake(connectCtx, &pluginproto.HandshakeRequest{})
-	} else if r.Manifest.ExtensionType == ExtensionSearch {
-		handshakeWire, err = webSearchClient.Handshake(connectCtx, &pluginproto.HandshakeRequest{})
-	} else {
-		handshakeWire, err = client.Handshake(connectCtx, &pluginproto.HandshakeRequest{})
-	}
+	controlClient := pluginapi.NewPluginControlClient(conn)
+	handshakeWire, err := controlClient.Handshake(connectCtx, &pluginproto.HandshakeRequest{})
 	if err != nil {
 		_ = conn.Close()
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		return fmt.Errorf("docker plugin handshake: %w", err)
 	}
-	if err := pluginapi.DecodeHandshake(handshakeWire, &handshake); err != nil {
+	if _, err := validateHandshake(r.Manifest, handshakeWire); err != nil {
 		_ = conn.Close()
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		return err
 	}
-	if handshake.PluginID != "" && handshake.PluginID != r.Manifest.ID {
-		_ = conn.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return fmt.Errorf("docker plugin handshake ID %q does not match manifest %q", handshake.PluginID, r.Manifest.ID)
-	}
-	if err := validateRuntimeCapabilities(r.Manifest, handshake.Capabilities); err != nil {
-		_ = conn.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return fmt.Errorf("docker plugin capabilities: %w", err)
-	}
 	r.mu.Lock()
-	r.cmd, r.conn, r.client, r.parserClient, r.webSearchClient, r.socket = cmd, conn, client, parserClient, webSearchClient, hostSocket
+	r.cmd, r.conn, r.controlClient, r.socket = cmd, conn, controlClient, hostSocket
 	r.mu.Unlock()
 	return nil
 }
@@ -156,7 +135,7 @@ func (r *DockerRuntime) dockerArgs(dir, containerSocket, containerName string) [
 func (r *DockerRuntime) Stop(context.Context) error {
 	r.mu.Lock()
 	cmd, conn, dir, ownsDir := r.cmd, r.conn, r.SocketDir, r.ownsSocketDir
-	r.cmd, r.conn, r.client, r.parserClient, r.webSearchClient = nil, nil, nil, nil, nil
+	r.cmd, r.conn, r.controlClient = nil, nil, nil
 	r.ownsSocketDir = false
 	r.mu.Unlock()
 	if conn != nil {
@@ -174,24 +153,14 @@ func (r *DockerRuntime) Stop(context.Context) error {
 
 func (r *DockerRuntime) Health(ctx context.Context) HealthStatus {
 	r.mu.RLock()
-	client := r.client
-	parserClient := r.parserClient
-	webSearchClient := r.webSearchClient
+	controlClient := r.controlClient
 	r.mu.RUnlock()
-	if client == nil && parserClient == nil && webSearchClient == nil {
+	if controlClient == nil {
 		return HealthStatus{State: StateStopped, CheckedAt: time.Now().UTC()}
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	var wire *pluginproto.HealthResponse
-	var err error
-	if r.Manifest.ExtensionType == ExtensionParser {
-		wire, err = parserClient.Health(checkCtx, &pluginproto.HealthRequest{})
-	} else if r.Manifest.ExtensionType == ExtensionSearch {
-		wire, err = webSearchClient.Health(checkCtx, &pluginproto.HealthRequest{})
-	} else {
-		wire, err = client.Health(checkCtx, &pluginproto.HealthRequest{})
-	}
+	wire, err := controlClient.Health(checkCtx, &pluginproto.HealthRequest{})
 	if err != nil {
 		return HealthStatus{State: StateUnhealthy, Message: err.Error(), CheckedAt: time.Now().UTC()}
 	}
@@ -206,31 +175,14 @@ func (r *DockerRuntime) Health(ctx context.Context) HealthStatus {
 	return HealthStatus{State: state, Message: health.Message, CheckedAt: time.Now().UTC()}
 }
 
-func (r *DockerRuntime) Client() (pluginapi.DataSourcePluginClient, bool) {
+// Conn exposes the raw gRPC connection so protocol adapters can construct their
+// own type-specific clients. The runtime keeps only the control-plane client.
+func (r *DockerRuntime) Conn() *grpc.ClientConn {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.client, r.client != nil
-}
-
-func (r *DockerRuntime) ParserClient() (pluginapi.ParserPluginClient, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.parserClient, r.parserClient != nil
-}
-
-func (r *DockerRuntime) WebSearchClient() (pluginapi.WebSearchPluginClient, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.webSearchClient, r.webSearchClient != nil
+	return r.conn
 }
 
 func (r *DockerRuntime) clientReadyLocked() bool {
-	switch r.Manifest.ExtensionType {
-	case ExtensionParser:
-		return r.parserClient != nil
-	case ExtensionSearch:
-		return r.webSearchClient != nil
-	default:
-		return r.client != nil
-	}
+	return r.controlClient != nil
 }

@@ -9,10 +9,6 @@ import (
 	"github.com/Tencent/WeKnora/pkg/pluginapi"
 )
 
-type clientProvider interface {
-	Client() (pluginapi.DataSourcePluginClient, bool)
-}
-
 // RegisterExternalDataSource connects a lifecycle runtime to the existing
 // datasource registry without adding a connector-specific branch to the
 // application. The manifest ID is the default connector type; metadata can
@@ -21,9 +17,9 @@ func RegisterExternalDataSource(manager *Manager, registry *datasource.Connector
 	if manifest.ExtensionType != ExtensionDataSource {
 		return "", fmt.Errorf("plugin %q is not a datasource", manifest.ID)
 	}
-	provider, ok := runtime.(clientProvider)
+	provider, ok := runtime.(connProvider)
 	if !ok {
-		return "", fmt.Errorf("runtime for plugin %q does not expose a gRPC client", manifest.ID)
+		return "", fmt.Errorf("runtime for plugin %q does not expose a gRPC connection", manifest.ID)
 	}
 	if err := manager.Register(manifest, runtime); err != nil {
 		return "", err
@@ -45,11 +41,12 @@ func RegisterExternalDataSource(manager *Manager, registry *datasource.Connector
 			return nil, err
 		}
 		generation, release := invocationLease.Generation, invocationLease.Close
-		client, ok := provider.Client()
-		if !ok {
+		conn := provider.Conn()
+		if conn == nil {
 			release()
 			return nil, fmt.Errorf("plugin %q is not running", manifest.ID)
 		}
+		client := pluginapi.NewDataSourcePluginClient(conn)
 		var streaming pluginapi.DataSourceStreamingPluginClient
 		if candidate, ok := client.(pluginapi.DataSourceStreamingPluginClient); ok {
 			streaming = candidate

@@ -10,6 +10,14 @@ import (
 
 const ProtocolVersionV1 = "v1"
 
+// Extension type constants for the SDK control plane. They mirror the values
+// used by the host manifest but stay independent of the main repository.
+const (
+	ExtensionTypeDataSource = "datasource"
+	ExtensionTypeParser     = "parser"
+	ExtensionTypeSearch     = "search"
+)
+
 type Resource struct {
 	ExternalID string            `json:"external_id"`
 	Name       string            `json:"name"`
@@ -39,6 +47,8 @@ type HandshakeResponse struct {
 	ProtocolVersion string   `json:"protocol_version"`
 	PluginID        string   `json:"plugin_id"`
 	Capabilities    []string `json:"capabilities,omitempty"`
+	ExtensionType   string   `json:"extension_type,omitempty"`
+	Services        []string `json:"services,omitempty"`
 }
 type HealthResponse struct {
 	State   string `json:"state"`
@@ -163,7 +173,7 @@ func DecodeResponse(v *pluginproto.DataSourceResponse, out *Response) error {
 	return nil
 }
 func EncodeHandshake(v HandshakeResponse) *pluginproto.HandshakeResponse {
-	return &pluginproto.HandshakeResponse{ProtocolVersion: v.ProtocolVersion, PluginId: v.PluginID, Capabilities: v.Capabilities}
+	return &pluginproto.HandshakeResponse{ProtocolVersion: v.ProtocolVersion, PluginId: v.PluginID, Capabilities: v.Capabilities, ExtensionType: v.ExtensionType, Services: v.Services}
 }
 func DecodeHandshake(v *pluginproto.HandshakeResponse, out *HandshakeResponse) error {
 	if v == nil {
@@ -172,6 +182,8 @@ func DecodeHandshake(v *pluginproto.HandshakeResponse, out *HandshakeResponse) e
 	out.ProtocolVersion = v.ProtocolVersion
 	out.PluginID = v.PluginId
 	out.Capabilities = v.Capabilities
+	out.ExtensionType = v.ExtensionType
+	out.Services = v.Services
 	return nil
 }
 func EncodeHealth(v HealthResponse) *pluginproto.HealthResponse {

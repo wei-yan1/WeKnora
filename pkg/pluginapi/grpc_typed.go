@@ -9,14 +9,78 @@ import (
 )
 
 const (
-	dataSourceService = "weknora.plugin.v1.DataSourcePlugin"
-	parserService     = "weknora.plugin.v1.ParserPlugin"
-	webSearchService  = "weknora.plugin.v1.WebSearchPlugin"
+	dataSourceService   = "weknora.plugin.v1.DataSourcePlugin"
+	parserService       = "weknora.plugin.v1.ParserPlugin"
+	webSearchService    = "weknora.plugin.v1.WebSearchPlugin"
+	pluginControlService = "weknora.plugin.v1.PluginControl"
 )
 
-type DataSourcePluginServer interface {
+// PluginControlClient is the shared control-plane client. Runtimes depend only
+// on this interface, never on type-specific clients such as
+// DataSourcePluginClient. Handshake and Health are uniform across datasource,
+// parser, search, model and retriever plugins.
+type PluginControlClient interface {
+	Handshake(context.Context, *proto.HandshakeRequest, ...grpc.CallOption) (*proto.HandshakeResponse, error)
+	Health(context.Context, *proto.HealthRequest, ...grpc.CallOption) (*proto.HealthResponse, error)
+}
+
+type PluginControlServer interface {
 	Handshake(context.Context, *proto.HandshakeRequest) (*proto.HandshakeResponse, error)
 	Health(context.Context, *proto.HealthRequest) (*proto.HealthResponse, error)
+}
+
+type pluginControlClient struct{ cc grpc.ClientConnInterface }
+
+func NewPluginControlClient(cc grpc.ClientConnInterface) PluginControlClient {
+	return &pluginControlClient{cc: cc}
+}
+
+func (c *pluginControlClient) Handshake(ctx context.Context, in *proto.HandshakeRequest, opts ...grpc.CallOption) (*proto.HandshakeResponse, error) {
+	out := new(proto.HandshakeResponse)
+	err := c.cc.Invoke(ctx, "/"+pluginControlService+"/Handshake", in, out, opts...)
+	return out, err
+}
+
+func (c *pluginControlClient) Health(ctx context.Context, in *proto.HealthRequest, opts ...grpc.CallOption) (*proto.HealthResponse, error) {
+	out := new(proto.HealthResponse)
+	err := c.cc.Invoke(ctx, "/"+pluginControlService+"/Health", in, out, opts...)
+	return out, err
+}
+
+func RegisterPluginControlServer(r grpc.ServiceRegistrar, s PluginControlServer) {
+	r.RegisterService(&pluginControlServiceDesc, s)
+}
+
+var pluginControlServiceDesc = grpc.ServiceDesc{
+	ServiceName: pluginControlService,
+	HandlerType: (*PluginControlServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{MethodName: "Handshake", Handler: controlHandler(func(s PluginControlServer, c context.Context, in *proto.HandshakeRequest) (any, error) {
+			return s.Handshake(c, in)
+		}, func() *proto.HandshakeRequest { return &proto.HandshakeRequest{} })},
+		{MethodName: "Health", Handler: controlHandler(func(s PluginControlServer, c context.Context, in *proto.HealthRequest) (any, error) {
+			return s.Health(c, in)
+		}, func() *proto.HealthRequest { return &proto.HealthRequest{} })},
+	},
+}
+
+func controlHandler[T any](call func(PluginControlServer, context.Context, T) (any, error), newReq func() T) grpc.MethodHandler {
+	return func(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+		in := newReq()
+		if err := dec(in); err != nil {
+			return nil, err
+		}
+		s := srv.(PluginControlServer)
+		if interceptor == nil {
+			return call(s, ctx, in)
+		}
+		info := &grpc.UnaryServerInfo{Server: srv}
+		h := func(ctx context.Context, req any) (any, error) { return call(s, ctx, req.(T)) }
+		return interceptor(ctx, in, info, h)
+	}
+}
+
+type DataSourcePluginServer interface {
 	Validate(context.Context, *proto.DataSourceRequest) (*proto.DataSourceResponse, error)
 	ListResources(context.Context, *proto.DataSourceRequest) (*proto.DataSourceResponse, error)
 	ResolveResourceAncestors(context.Context, *proto.DataSourceRequest) (*proto.DataSourceResponse, error)
@@ -25,8 +89,6 @@ type DataSourcePluginServer interface {
 }
 
 type DataSourcePluginClient interface {
-	Handshake(context.Context, *proto.HandshakeRequest, ...grpc.CallOption) (*proto.HandshakeResponse, error)
-	Health(context.Context, *proto.HealthRequest, ...grpc.CallOption) (*proto.HealthResponse, error)
 	Validate(context.Context, *proto.DataSourceRequest, ...grpc.CallOption) (*proto.DataSourceResponse, error)
 	ListResources(context.Context, *proto.DataSourceRequest, ...grpc.CallOption) (*proto.DataSourceResponse, error)
 	ResolveResourceAncestors(context.Context, *proto.DataSourceRequest, ...grpc.CallOption) (*proto.DataSourceResponse, error)
@@ -68,16 +130,6 @@ type dataSourcePluginClient struct{ cc grpc.ClientConnInterface }
 
 func NewDataSourcePluginClient(cc grpc.ClientConnInterface) DataSourcePluginClient {
 	return &dataSourcePluginClient{cc: cc}
-}
-func (c *dataSourcePluginClient) Handshake(ctx context.Context, in *proto.HandshakeRequest, opts ...grpc.CallOption) (*proto.HandshakeResponse, error) {
-	out := new(proto.HandshakeResponse)
-	err := c.cc.Invoke(ctx, "/"+dataSourceService+"/Handshake", in, out, opts...)
-	return out, err
-}
-func (c *dataSourcePluginClient) Health(ctx context.Context, in *proto.HealthRequest, opts ...grpc.CallOption) (*proto.HealthResponse, error) {
-	out := new(proto.HealthResponse)
-	err := c.cc.Invoke(ctx, "/"+dataSourceService+"/Health", in, out, opts...)
-	return out, err
 }
 func (c *dataSourcePluginClient) Validate(ctx context.Context, in *proto.DataSourceRequest, opts ...grpc.CallOption) (*proto.DataSourceResponse, error) {
 	out := new(proto.DataSourceResponse)
@@ -153,12 +205,6 @@ func dataSourceHandler[T any](decode func(any) error, call func(DataSourcePlugin
 }
 
 var dataSourceServiceDesc = grpc.ServiceDesc{ServiceName: dataSourceService, HandlerType: (*DataSourcePluginServer)(nil), Methods: []grpc.MethodDesc{
-	{MethodName: "Handshake", Handler: dataSourceHandler(func(any) error { return nil }, func(s DataSourcePluginServer, c context.Context, in *proto.HandshakeRequest) (any, error) {
-		return s.Handshake(c, in)
-	}, func() *proto.HandshakeRequest { return &proto.HandshakeRequest{} })},
-	{MethodName: "Health", Handler: dataSourceHandler(func(any) error { return nil }, func(s DataSourcePluginServer, c context.Context, in *proto.HealthRequest) (any, error) {
-		return s.Health(c, in)
-	}, func() *proto.HealthRequest { return &proto.HealthRequest{} })},
 	{MethodName: "Validate", Handler: dataSourceHandler(func(any) error { return nil }, func(s DataSourcePluginServer, c context.Context, in *proto.DataSourceRequest) (any, error) {
 		return s.Validate(c, in)
 	}, func() *proto.DataSourceRequest { return &proto.DataSourceRequest{} })},
@@ -204,29 +250,15 @@ func (s dataSourceResponseServer) Send(response *proto.DataSourceResponse) error
 }
 
 type ParserPluginServer interface {
-	Handshake(context.Context, *proto.HandshakeRequest) (*proto.HandshakeResponse, error)
-	Health(context.Context, *proto.HealthRequest) (*proto.HealthResponse, error)
 	Parse(context.Context, *proto.ParserRequest) (*proto.ParserResponse, error)
 }
 type ParserPluginClient interface {
-	Handshake(context.Context, *proto.HandshakeRequest, ...grpc.CallOption) (*proto.HandshakeResponse, error)
-	Health(context.Context, *proto.HealthRequest, ...grpc.CallOption) (*proto.HealthResponse, error)
 	Parse(context.Context, *proto.ParserRequest, ...grpc.CallOption) (*proto.ParserResponse, error)
 }
 type parserPluginClient struct{ cc grpc.ClientConnInterface }
 
 func NewParserPluginClient(cc grpc.ClientConnInterface) ParserPluginClient {
 	return &parserPluginClient{cc: cc}
-}
-func (c *parserPluginClient) Handshake(ctx context.Context, in *proto.HandshakeRequest, o ...grpc.CallOption) (*proto.HandshakeResponse, error) {
-	out := new(proto.HandshakeResponse)
-	err := c.cc.Invoke(ctx, "/"+parserService+"/Handshake", in, out, o...)
-	return out, err
-}
-func (c *parserPluginClient) Health(ctx context.Context, in *proto.HealthRequest, o ...grpc.CallOption) (*proto.HealthResponse, error) {
-	out := new(proto.HealthResponse)
-	err := c.cc.Invoke(ctx, "/"+parserService+"/Health", in, out, o...)
-	return out, err
 }
 func (c *parserPluginClient) Parse(ctx context.Context, in *proto.ParserRequest, o ...grpc.CallOption) (*proto.ParserResponse, error) {
 	out := new(proto.ParserResponse)
@@ -238,12 +270,6 @@ func RegisterParserPluginServer(r grpc.ServiceRegistrar, s ParserPluginServer) {
 }
 
 var parserServiceDesc = grpc.ServiceDesc{ServiceName: parserService, HandlerType: (*ParserPluginServer)(nil), Methods: []grpc.MethodDesc{
-	{MethodName: "Handshake", Handler: parserHandler(func(s ParserPluginServer, c context.Context, in *proto.HandshakeRequest) (any, error) {
-		return s.Handshake(c, in)
-	}, func() *proto.HandshakeRequest { return &proto.HandshakeRequest{} })},
-	{MethodName: "Health", Handler: parserHandler(func(s ParserPluginServer, c context.Context, in *proto.HealthRequest) (any, error) {
-		return s.Health(c, in)
-	}, func() *proto.HealthRequest { return &proto.HealthRequest{} })},
 	{MethodName: "Parse", Handler: parserHandler(func(s ParserPluginServer, c context.Context, in *proto.ParserRequest) (any, error) {
 		return s.Parse(c, in)
 	}, func() *proto.ParserRequest { return &proto.ParserRequest{} })},
@@ -266,29 +292,15 @@ func parserHandler[T any](call func(ParserPluginServer, context.Context, T) (any
 }
 
 type WebSearchPluginServer interface {
-	Handshake(context.Context, *proto.HandshakeRequest) (*proto.HandshakeResponse, error)
-	Health(context.Context, *proto.HealthRequest) (*proto.HealthResponse, error)
 	Search(context.Context, *proto.WebSearchRequest) (*proto.WebSearchResponse, error)
 }
 type WebSearchPluginClient interface {
-	Handshake(context.Context, *proto.HandshakeRequest, ...grpc.CallOption) (*proto.HandshakeResponse, error)
-	Health(context.Context, *proto.HealthRequest, ...grpc.CallOption) (*proto.HealthResponse, error)
 	Search(context.Context, *proto.WebSearchRequest, ...grpc.CallOption) (*proto.WebSearchResponse, error)
 }
 type webSearchPluginClient struct{ cc grpc.ClientConnInterface }
 
 func NewWebSearchPluginClient(cc grpc.ClientConnInterface) WebSearchPluginClient {
 	return &webSearchPluginClient{cc: cc}
-}
-func (c *webSearchPluginClient) Handshake(ctx context.Context, in *proto.HandshakeRequest, o ...grpc.CallOption) (*proto.HandshakeResponse, error) {
-	out := new(proto.HandshakeResponse)
-	err := c.cc.Invoke(ctx, "/"+webSearchService+"/Handshake", in, out, o...)
-	return out, err
-}
-func (c *webSearchPluginClient) Health(ctx context.Context, in *proto.HealthRequest, o ...grpc.CallOption) (*proto.HealthResponse, error) {
-	out := new(proto.HealthResponse)
-	err := c.cc.Invoke(ctx, "/"+webSearchService+"/Health", in, out, o...)
-	return out, err
 }
 func (c *webSearchPluginClient) Search(ctx context.Context, in *proto.WebSearchRequest, o ...grpc.CallOption) (*proto.WebSearchResponse, error) {
 	out := new(proto.WebSearchResponse)
@@ -300,12 +312,6 @@ func RegisterWebSearchPluginServer(r grpc.ServiceRegistrar, s WebSearchPluginSer
 }
 
 var webSearchServiceDesc = grpc.ServiceDesc{ServiceName: webSearchService, HandlerType: (*WebSearchPluginServer)(nil), Methods: []grpc.MethodDesc{
-	{MethodName: "Handshake", Handler: searchHandler(func(s WebSearchPluginServer, c context.Context, in *proto.HandshakeRequest) (any, error) {
-		return s.Handshake(c, in)
-	}, func() *proto.HandshakeRequest { return &proto.HandshakeRequest{} })},
-	{MethodName: "Health", Handler: searchHandler(func(s WebSearchPluginServer, c context.Context, in *proto.HealthRequest) (any, error) {
-		return s.Health(c, in)
-	}, func() *proto.HealthRequest { return &proto.HealthRequest{} })},
 	{MethodName: "Search", Handler: searchHandler(func(s WebSearchPluginServer, c context.Context, in *proto.WebSearchRequest) (any, error) {
 		return s.Search(c, in)
 	}, func() *proto.WebSearchRequest { return &proto.WebSearchRequest{} })},

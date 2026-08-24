@@ -23,19 +23,21 @@ import (
 // ProcessRuntime is the development/desktop runtime. It deliberately has no
 // claim of security isolation: use DockerRuntime or another constrained agent
 // in a server deployment. Both runtimes implement the same lifecycle surface.
+//
+// ProcessRuntime depends only on the shared control-plane client
+// (pluginapi.PluginControlClient). It never holds type-specific protocol
+// clients, so adding a new extension type requires no change here.
 type ProcessRuntime struct {
 	Manifest Manifest
 	Command  string
 	Args     []string
 	Address  string
 
-	mu              sync.RWMutex
-	cmd             *exec.Cmd
-	conn            *grpc.ClientConn
-	client          pluginapi.DataSourcePluginClient
-	parserClient    pluginapi.ParserPluginClient
-	webSearchClient pluginapi.WebSearchPluginClient
-	AuditSink       AuditSink
+	mu            sync.RWMutex
+	cmd           *exec.Cmd
+	conn          *grpc.ClientConn
+	controlClient pluginapi.PluginControlClient
+	AuditSink     AuditSink
 }
 
 func NewProcessRuntime(manifest Manifest, command string, args ...string) *ProcessRuntime {
@@ -92,50 +94,22 @@ func (r *ProcessRuntime) Start(ctx context.Context) error {
 		_ = cmd.Wait()
 		return fmt.Errorf("connect plugin process: %w", err)
 	}
-	client := pluginapi.NewDataSourcePluginClient(conn)
-	parserClient := pluginapi.NewParserPluginClient(conn)
-	webSearchClient := pluginapi.NewWebSearchPluginClient(conn)
-	var handshake pluginapi.HandshakeResponse
-	var handshakeWire *pluginproto.HandshakeResponse
-	if r.Manifest.ExtensionType == ExtensionParser {
-		handshakeWire, err = parserClient.Handshake(connectCtx, &pluginproto.HandshakeRequest{})
-	} else if r.Manifest.ExtensionType == ExtensionSearch {
-		handshakeWire, err = webSearchClient.Handshake(connectCtx, &pluginproto.HandshakeRequest{})
-	} else {
-		handshakeWire, err = client.Handshake(connectCtx, &pluginproto.HandshakeRequest{})
-	}
+	controlClient := pluginapi.NewPluginControlClient(conn)
+	handshakeWire, err := controlClient.Handshake(connectCtx, &pluginproto.HandshakeRequest{})
 	if err != nil {
 		_ = conn.Close()
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		return fmt.Errorf("plugin handshake: %w", err)
 	}
-	if err := pluginapi.DecodeHandshake(handshakeWire, &handshake); err != nil {
+	if _, err := validateHandshake(r.Manifest, handshakeWire); err != nil {
 		_ = conn.Close()
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		return err
 	}
-	if handshake.PluginID != "" && handshake.PluginID != r.Manifest.ID {
-		_ = conn.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return fmt.Errorf("plugin handshake ID %q does not match manifest %q", handshake.PluginID, r.Manifest.ID)
-	}
-	if handshake.ProtocolVersion != "" && handshake.ProtocolVersion != r.Manifest.ProtocolVersion {
-		_ = conn.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return fmt.Errorf("plugin handshake protocol %q does not match manifest %q", handshake.ProtocolVersion, r.Manifest.ProtocolVersion)
-	}
-	if err := validateRuntimeCapabilities(r.Manifest, handshake.Capabilities); err != nil {
-		_ = conn.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return fmt.Errorf("plugin capabilities: %w", err)
-	}
 	r.mu.Lock()
-	r.Address, r.cmd, r.conn, r.client, r.parserClient, r.webSearchClient = address, cmd, conn, client, parserClient, webSearchClient
+	r.Address, r.cmd, r.conn, r.controlClient = address, cmd, conn, controlClient
 	r.mu.Unlock()
 	return nil
 }
@@ -143,7 +117,7 @@ func (r *ProcessRuntime) Start(ctx context.Context) error {
 func (r *ProcessRuntime) Stop(context.Context) error {
 	r.mu.Lock()
 	cmd, conn := r.cmd, r.conn
-	r.cmd, r.conn, r.client, r.parserClient, r.webSearchClient = nil, nil, nil, nil, nil
+	r.cmd, r.conn, r.controlClient = nil, nil, nil
 	r.mu.Unlock()
 	if conn != nil {
 		_ = conn.Close()
@@ -160,24 +134,14 @@ func (r *ProcessRuntime) Stop(context.Context) error {
 
 func (r *ProcessRuntime) Health(ctx context.Context) HealthStatus {
 	r.mu.RLock()
-	client := r.client
-	parserClient := r.parserClient
-	webSearchClient := r.webSearchClient
+	controlClient := r.controlClient
 	r.mu.RUnlock()
-	if client == nil && parserClient == nil && webSearchClient == nil {
+	if controlClient == nil {
 		return HealthStatus{State: StateStopped, CheckedAt: time.Now().UTC()}
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	var wire *pluginproto.HealthResponse
-	var err error
-	if r.Manifest.ExtensionType == ExtensionParser {
-		wire, err = parserClient.Health(checkCtx, &pluginproto.HealthRequest{})
-	} else if r.Manifest.ExtensionType == ExtensionSearch {
-		wire, err = webSearchClient.Health(checkCtx, &pluginproto.HealthRequest{})
-	} else {
-		wire, err = client.Health(checkCtx, &pluginproto.HealthRequest{})
-	}
+	wire, err := controlClient.Health(checkCtx, &pluginproto.HealthRequest{})
 	if err != nil {
 		return HealthStatus{State: StateUnhealthy, Message: err.Error(), CheckedAt: time.Now().UTC()}
 	}
@@ -192,33 +156,16 @@ func (r *ProcessRuntime) Health(ctx context.Context) HealthStatus {
 	return HealthStatus{State: state, Message: health.Message, CheckedAt: time.Now().UTC()}
 }
 
-func (r *ProcessRuntime) Client() (pluginapi.DataSourcePluginClient, bool) {
+// Conn exposes the raw gRPC connection so protocol adapters can construct their
+// own type-specific clients. The runtime keeps only the control-plane client.
+func (r *ProcessRuntime) Conn() *grpc.ClientConn {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.client, r.client != nil
-}
-
-func (r *ProcessRuntime) ParserClient() (pluginapi.ParserPluginClient, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.parserClient, r.parserClient != nil
-}
-
-func (r *ProcessRuntime) WebSearchClient() (pluginapi.WebSearchPluginClient, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.webSearchClient, r.webSearchClient != nil
+	return r.conn
 }
 
 func (r *ProcessRuntime) clientReadyLocked() bool {
-	switch r.Manifest.ExtensionType {
-	case ExtensionParser:
-		return r.parserClient != nil
-	case ExtensionSearch:
-		return r.webSearchClient != nil
-	default:
-		return r.client != nil
-	}
+	return r.controlClient != nil
 }
 
 // ConnectorFactory returns an instance-aware resolver factory. Start the
@@ -231,10 +178,11 @@ func (r *ProcessRuntime) ConnectorFactory(connectorType string, lazyStart bool) 
 				return nil, err
 			}
 		}
-		client, ok := r.Client()
-		if !ok {
+		conn := r.Conn()
+		if conn == nil {
 			return nil, fmt.Errorf("plugin %q is not running", r.Manifest.ID)
 		}
+		client := pluginapi.NewDataSourcePluginClient(conn)
 		return processConnectorLease{connector: &GRPCConnectorProxy{ConnectorType: connectorType, Client: client}}, nil
 	}
 }

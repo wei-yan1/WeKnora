@@ -25,7 +25,7 @@ type DataSourceHandler struct {
 }
 
 func (h DataSourceHandler) Handshake(context.Context, *pluginproto.HandshakeRequest) (*pluginproto.HandshakeResponse, error) {
-	return EncodeHandshake(HandshakeResponse{ProtocolVersion: ProtocolVersionV1, PluginID: h.PluginID, Capabilities: h.Capabilities}), nil
+	return EncodeHandshake(HandshakeResponse{ProtocolVersion: ProtocolVersionV1, PluginID: h.PluginID, Capabilities: h.Capabilities, ExtensionType: ExtensionTypeDataSource, Services: []string{ExtensionTypeDataSource}}), nil
 }
 func (h DataSourceHandler) Health(ctx context.Context, _ *pluginproto.HealthRequest) (*pluginproto.HealthResponse, error) {
 	v := HealthResponse{State: "running"}
@@ -126,7 +126,10 @@ func errorString(err error) string {
 	return err.Error()
 }
 func Serve(ctx context.Context, address string, handler DataSourceHandler, opts ...grpc.ServerOption) error {
-	return servePlugin(ctx, address, opts, func(s *grpc.Server) { RegisterDataSourcePluginServer(s, handler) })
+	return servePlugin(ctx, address, opts, func(s *grpc.Server) {
+		RegisterPluginControlServer(s, handler)
+		RegisterDataSourcePluginServer(s, handler)
+	})
 }
 func servePlugin(ctx context.Context, address string, opts []grpc.ServerOption, register func(*grpc.Server)) error {
 	network, listenAddress := "tcp", address

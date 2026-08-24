@@ -15,7 +15,7 @@ import (
 )
 
 type parserTestRuntime struct {
-	client pluginapi.ParserPluginClient
+	conn *grpc.ClientConn
 }
 
 func (r *parserTestRuntime) Start(context.Context) error { return nil }
@@ -23,8 +23,8 @@ func (r *parserTestRuntime) Stop(context.Context) error  { return nil }
 func (r *parserTestRuntime) Health(context.Context) HealthStatus {
 	return HealthStatus{State: StateRunning, CheckedAt: time.Now().UTC()}
 }
-func (r *parserTestRuntime) ParserClient() (pluginapi.ParserPluginClient, bool) {
-	return r.client, r.client != nil
+func (r *parserTestRuntime) Conn() *grpc.ClientConn {
+	return r.conn
 }
 
 func TestExternalParserRegistrationUsesExistingDocparserRegistry(t *testing.T) {
@@ -50,7 +50,7 @@ func TestExternalParserRegistrationUsesExistingDocparserRegistry(t *testing.T) {
 	engineName := "test_external_parser"
 	descriptor := ParserDescriptor{EngineName: engineName, Description: "test parser", FileTypes: []string{"txt"}}
 	manifest := Manifest{APIVersion: APIVersionV1, ID: "test.external-parser", Name: "Test External Parser", Version: "1.0.0", ExtensionType: ExtensionParser, ProtocolVersion: ProtocolVersionV1, Capabilities: []string{"parse"}, Metadata: map[string]any{"file_types": []any{"txt"}}}
-	runtime := &parserTestRuntime{client: pluginapi.NewParserPluginClient(conn)}
+	runtime := &parserTestRuntime{conn: conn}
 	manager := NewManager("")
 	require.NoError(t, RegisterExternalParser(manager, manifest, runtime, descriptor, false))
 	t.Cleanup(func() {

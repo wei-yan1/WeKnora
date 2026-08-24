@@ -16,7 +16,7 @@ func TestParserPluginGRPCContract(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	server := grpc.NewServer()
-	RegisterParserPluginServer(server, ParserHandler{
+	handler := ParserHandler{
 		PluginID:     "test.markdown-parser",
 		Capabilities: []string{"parse"},
 		OnParse: func(_ context.Context, request ParserRequest) (ParserResponse, error) {
@@ -25,7 +25,9 @@ func TestParserPluginGRPCContract(t *testing.T) {
 				Metadata:        map[string]string{"file_name": request.FileName},
 			}, nil
 		},
-	})
+	}
+	RegisterPluginControlServer(server, handler)
+	RegisterParserPluginServer(server, handler)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 
@@ -35,15 +37,16 @@ func TestParserPluginGRPCContract(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Close()
 	client := NewParserPluginClient(conn)
+	control := NewPluginControlClient(conn)
 
-	handshakeWire, err := client.Handshake(ctx, &pluginproto.HandshakeRequest{})
+	handshakeWire, err := control.Handshake(ctx, &pluginproto.HandshakeRequest{})
 	require.NoError(t, err)
 	var handshake HandshakeResponse
 	require.NoError(t, DecodeHandshake(handshakeWire, &handshake))
 	require.Equal(t, "test.markdown-parser", handshake.PluginID)
 	require.Equal(t, []string{"parse"}, handshake.Capabilities)
 
-	report := RunParserConformance(ctx, client, ParserRequest{FileContent: []byte("hello"), FileName: "README.md", FileType: "md"})
+	report := RunParserConformance(ctx, control, client, ParserRequest{FileContent: []byte("hello"), FileName: "README.md", FileType: "md"})
 	require.True(t, report.HandshakeOK)
 	require.True(t, report.HealthOK)
 	require.True(t, report.ParseOK)

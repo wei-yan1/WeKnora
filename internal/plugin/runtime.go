@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/Tencent/WeKnora/pkg/pluginapi"
+	pluginproto "github.com/Tencent/WeKnora/pkg/pluginapi/proto"
+	"google.golang.org/grpc"
 )
 
 // Runtime is the small common lifecycle surface shared by built-in adapters
@@ -18,6 +22,37 @@ type Runtime interface {
 
 type CapabilityReporter interface {
 	Capabilities() []string
+}
+
+// connProvider is implemented by runtimes that expose a raw gRPC connection.
+// Protocol adapters construct their own type-specific clients from it, keeping
+// the runtime free of extension-type knowledge.
+type connProvider interface {
+	Conn() *grpc.ClientConn
+}
+
+// validateHandshake validates a control-plane handshake response against the
+// manifest without branching on the extension type. The shared PluginControl
+// handshake reports plugin identity, protocol version, capabilities and
+// extension type; the runtime only compares these against the manifest.
+func validateHandshake(manifest Manifest, handshakeWire *pluginproto.HandshakeResponse) (pluginapi.HandshakeResponse, error) {
+	var handshake pluginapi.HandshakeResponse
+	if err := pluginapi.DecodeHandshake(handshakeWire, &handshake); err != nil {
+		return handshake, err
+	}
+	if handshake.PluginID != "" && handshake.PluginID != manifest.ID {
+		return handshake, fmt.Errorf("plugin handshake ID %q does not match manifest %q", handshake.PluginID, manifest.ID)
+	}
+	if handshake.ProtocolVersion != "" && handshake.ProtocolVersion != manifest.ProtocolVersion {
+		return handshake, fmt.Errorf("plugin handshake protocol %q does not match manifest %q", handshake.ProtocolVersion, manifest.ProtocolVersion)
+	}
+	if handshake.ExtensionType != "" && handshake.ExtensionType != string(manifest.ExtensionType) {
+		return handshake, fmt.Errorf("plugin handshake extension type %q does not match manifest %q", handshake.ExtensionType, manifest.ExtensionType)
+	}
+	if err := validateRuntimeCapabilities(manifest, handshake.Capabilities); err != nil {
+		return handshake, fmt.Errorf("plugin capabilities: %w", err)
+	}
+	return handshake, nil
 }
 
 func validateRuntimeCapabilities(manifest Manifest, actual []string) error {

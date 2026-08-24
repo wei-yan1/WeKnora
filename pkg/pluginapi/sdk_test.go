@@ -16,12 +16,14 @@ func TestDataSourcePluginGRPCContract(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	server := grpc.NewServer()
-	RegisterDataSourcePluginServer(server, DataSourceHandler{
+	handler := DataSourceHandler{
 		PluginID: "test.localdir", Capabilities: []string{"incremental"},
 		OnFetchAll: func(context.Context, Request) ([]FetchedItem, error) {
 			return []FetchedItem{{ExternalID: "file:a", Content: []byte("hello")}}, nil
 		},
-	})
+	}
+	RegisterPluginControlServer(server, handler)
+	RegisterDataSourcePluginServer(server, handler)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 
@@ -31,7 +33,8 @@ func TestDataSourcePluginGRPCContract(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Close()
 	client := NewDataSourcePluginClient(conn)
-	handshakeWire, err := client.Handshake(ctx, &pluginproto.HandshakeRequest{})
+	control := NewPluginControlClient(conn)
+	handshakeWire, err := control.Handshake(ctx, &pluginproto.HandshakeRequest{})
 	require.NoError(t, err)
 	var handshake HandshakeResponse
 	require.NoError(t, DecodeHandshake(handshakeWire, &handshake))
@@ -51,13 +54,15 @@ func TestDataSourcePluginStreamingContract(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	server := grpc.NewServer()
-	RegisterDataSourcePluginServer(server, DataSourceHandler{
+	handler := DataSourceHandler{
 		PluginID: "test.streaming",
 		OnFetchAllStream: func(_ context.Context, _ Request, emit func(Response) error) error {
 			require.NoError(t, emit(Response{Items: []FetchedItem{{ExternalID: "file:a", Content: []byte("a")}}}))
 			return emit(Response{Cursor: map[string]any{"page": float64(1)}})
 		},
-	})
+	}
+	RegisterPluginControlServer(server, handler)
+	RegisterDataSourcePluginServer(server, handler)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 
@@ -85,13 +90,15 @@ func TestInvocationContextTravelsInGRPCMetadata(t *testing.T) {
 	require.NoError(t, err)
 	server := grpc.NewServer()
 	seen := make(chan InvocationContext, 1)
-	RegisterDataSourcePluginServer(server, DataSourceHandler{
+	handler := DataSourceHandler{
 		PluginID: "test.invocation",
 		OnValidate: func(ctx context.Context, _ Request) error {
 			seen <- InvocationContextFromContext(ctx)
 			return nil
 		},
-	})
+	}
+	RegisterPluginControlServer(server, handler)
+	RegisterDataSourcePluginServer(server, handler)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -22,7 +22,7 @@ type ConformanceReport struct {
 // RunDataSourceConformance is the repeatable smoke test a third-party plugin
 // author can run without importing WeKnora internals. It checks the protocol
 // handshake and that the core datasource operations return valid envelopes.
-func RunDataSourceConformance(ctx context.Context, client DataSourcePluginClient, request Request) ConformanceReport {
+func RunDataSourceConformance(ctx context.Context, control PluginControlClient, client DataSourcePluginClient, request Request) ConformanceReport {
 	started := time.Now()
 	report := ConformanceReport{}
 	appendError := func(err error) {
@@ -30,7 +30,7 @@ func RunDataSourceConformance(ctx context.Context, client DataSourcePluginClient
 			report.Errors = append(report.Errors, err.Error())
 		}
 	}
-	handshake, err := client.Handshake(ctx, &pluginproto.HandshakeRequest{})
+	handshake, err := control.Handshake(ctx, &pluginproto.HandshakeRequest{})
 	if err == nil {
 		var value HandshakeResponse
 		err = DecodeHandshake(handshake, &value)
@@ -41,7 +41,7 @@ func RunDataSourceConformance(ctx context.Context, client DataSourcePluginClient
 	if !report.HandshakeOK && err == nil {
 		appendError(fmt.Errorf("invalid handshake response"))
 	}
-	health, err := client.Health(ctx, &pluginproto.HealthRequest{})
+	health, err := control.Health(ctx, &pluginproto.HealthRequest{})
 	if err == nil {
 		var value HealthResponse
 		err = DecodeHealth(health, &value)

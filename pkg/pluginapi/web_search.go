@@ -76,7 +76,7 @@ type WebSearchHandler struct {
 }
 
 func (h WebSearchHandler) Handshake(context.Context, *pluginproto.HandshakeRequest) (*pluginproto.HandshakeResponse, error) {
-	return EncodeHandshake(HandshakeResponse{ProtocolVersion: ProtocolVersionV1, PluginID: h.PluginID, Capabilities: h.Capabilities}), nil
+	return EncodeHandshake(HandshakeResponse{ProtocolVersion: ProtocolVersionV1, PluginID: h.PluginID, Capabilities: h.Capabilities, ExtensionType: ExtensionTypeSearch, Services: []string{ExtensionTypeSearch}}), nil
 }
 func (h WebSearchHandler) Health(ctx context.Context, _ *pluginproto.HealthRequest) (*pluginproto.HealthResponse, error) {
 	v := HealthResponse{State: "running"}
@@ -100,5 +100,8 @@ func (h WebSearchHandler) Search(ctx context.Context, v *pluginproto.WebSearchRe
 	return EncodeWebSearchResponse(out), nil
 }
 func ServeWebSearch(ctx context.Context, address string, handler WebSearchHandler, opts ...grpc.ServerOption) error {
-	return servePlugin(ctx, address, opts, func(s *grpc.Server) { RegisterWebSearchPluginServer(s, handler) })
+	return servePlugin(ctx, address, opts, func(s *grpc.Server) {
+		RegisterPluginControlServer(s, handler)
+		RegisterWebSearchPluginServer(s, handler)
+	})
 }

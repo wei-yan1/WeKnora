@@ -11,6 +11,8 @@ message HandshakeResponse {
   string protocol_version = 1;
   string plugin_id = 2;
   repeated string capabilities = 3;
+  string extension_type = 4;
+  repeated string services = 5;
 }
 message HealthRequest {}
 message HealthResponse {
@@ -103,9 +105,16 @@ message WebSearchResponse {
   repeated WebSearchResult results = 1;
   string error = 2;
 }
-service DataSourcePlugin {
+
+// PluginControl is the shared control-plane contract implemented by every
+// plugin regardless of extension type. The lifecycle manager depends only on
+// this service, never on type-specific clients.
+service PluginControl {
   rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+service DataSourcePlugin {
   rpc Validate(DataSourceRequest) returns (DataSourceResponse);
   rpc ListResources(DataSourceRequest) returns (DataSourceResponse);
   rpc ResolveResourceAncestors(DataSourceRequest) returns (DataSourceResponse);
@@ -118,12 +127,8 @@ service DataSourcePlugin {
   rpc FetchIncrementalStream(DataSourceRequest) returns (stream DataSourceResponse);
 }
 service ParserPlugin {
-  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
-  rpc Health(HealthRequest) returns (HealthResponse);
   rpc Parse(ParserRequest) returns (ParserResponse);
 }
 service WebSearchPlugin {
-  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
-  rpc Health(HealthRequest) returns (HealthResponse);
   rpc Search(WebSearchRequest) returns (WebSearchResponse);
 }

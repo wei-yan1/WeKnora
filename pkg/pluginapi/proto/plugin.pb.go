@@ -63,6 +63,8 @@ type HandshakeResponse struct {
 	ProtocolVersion string                 `protobuf:"bytes,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	PluginId        string                 `protobuf:"bytes,2,opt,name=plugin_id,json=pluginId,proto3" json:"plugin_id,omitempty"`
 	Capabilities    []string               `protobuf:"bytes,3,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
+	ExtensionType   string                 `protobuf:"bytes,4,opt,name=extension_type,json=extensionType,proto3" json:"extension_type,omitempty"`
+	Services        []string               `protobuf:"bytes,5,rep,name=services,proto3" json:"services,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -114,6 +116,20 @@ func (x *HandshakeResponse) GetPluginId() string {
 func (x *HandshakeResponse) GetCapabilities() []string {
 	if x != nil {
 		return x.Capabilities
+	}
+	return nil
+}
+
+func (x *HandshakeResponse) GetExtensionType() string {
+	if x != nil {
+		return x.ExtensionType
+	}
+	return ""
+}
+
+func (x *HandshakeResponse) GetServices() []string {
+	if x != nil {
+		return x.Services
 	}
 	return nil
 }
@@ -1119,11 +1135,13 @@ var File_plugin_proto protoreflect.FileDescriptor
 const file_plugin_proto_rawDesc = "" +
 	"\n" +
 	"\fplugin.proto\x12\x11weknora.plugin.v1\x1a\x1cgoogle/protobuf/struct.proto\"\x12\n" +
-	"\x10HandshakeRequest\"\x7f\n" +
+	"\x10HandshakeRequest\"\xc2\x01\n" +
 	"\x11HandshakeResponse\x12)\n" +
 	"\x10protocol_version\x18\x01 \x01(\tR\x0fprotocolVersion\x12\x1b\n" +
 	"\tplugin_id\x18\x02 \x01(\tR\bpluginId\x12\"\n" +
-	"\fcapabilities\x18\x03 \x03(\tR\fcapabilities\"\x0f\n" +
+	"\fcapabilities\x18\x03 \x03(\tR\fcapabilities\x12%\n" +
+	"\x0eextension_type\x18\x04 \x01(\tR\rextensionType\x12\x1a\n" +
+	"\bservices\x18\x05 \x03(\tR\bservices\"\x0f\n" +
 	"\rHealthRequest\"@\n" +
 	"\x0eHealthResponse\x12\x14\n" +
 	"\x05state\x18\x01 \x01(\tR\x05state\x12\x18\n" +
@@ -1229,7 +1247,10 @@ const file_plugin_proto_rawDesc = "" +
 	"\fpublished_at\x18\x06 \x01(\tR\vpublishedAt\"g\n" +
 	"\x11WebSearchResponse\x12<\n" +
 	"\aresults\x18\x01 \x03(\v2\".weknora.plugin.v1.WebSearchResultR\aresults\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error2\xdd\x06\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error2\xb6\x01\n" +
+	"\rPluginControl\x12V\n" +
+	"\tHandshake\x12#.weknora.plugin.v1.HandshakeRequest\x1a$.weknora.plugin.v1.HandshakeResponse\x12M\n" +
+	"\x06Health\x12 .weknora.plugin.v1.HealthRequest\x1a!.weknora.plugin.v1.HealthResponse2\xdd\x06\n" +
 	"\x10DataSourcePlugin\x12V\n" +
 	"\tHandshake\x12#.weknora.plugin.v1.HandshakeRequest\x1a$.weknora.plugin.v1.HandshakeResponse\x12M\n" +
 	"\x06Health\x12 .weknora.plugin.v1.HealthRequest\x1a!.weknora.plugin.v1.HealthResponse\x12W\n" +
@@ -1298,38 +1319,42 @@ var file_plugin_proto_depIdxs = []int32{
 	18, // 9: weknora.plugin.v1.ParserResponse.metadata:type_name -> weknora.plugin.v1.ParserResponse.MetadataEntry
 	19, // 10: weknora.plugin.v1.WebSearchRequest.extra_config:type_name -> weknora.plugin.v1.WebSearchRequest.ExtraConfigEntry
 	13, // 11: weknora.plugin.v1.WebSearchResponse.results:type_name -> weknora.plugin.v1.WebSearchResult
-	0,  // 12: weknora.plugin.v1.DataSourcePlugin.Handshake:input_type -> weknora.plugin.v1.HandshakeRequest
-	2,  // 13: weknora.plugin.v1.DataSourcePlugin.Health:input_type -> weknora.plugin.v1.HealthRequest
-	5,  // 14: weknora.plugin.v1.DataSourcePlugin.Validate:input_type -> weknora.plugin.v1.DataSourceRequest
-	5,  // 15: weknora.plugin.v1.DataSourcePlugin.ListResources:input_type -> weknora.plugin.v1.DataSourceRequest
-	5,  // 16: weknora.plugin.v1.DataSourcePlugin.ResolveResourceAncestors:input_type -> weknora.plugin.v1.DataSourceRequest
-	5,  // 17: weknora.plugin.v1.DataSourcePlugin.FetchAll:input_type -> weknora.plugin.v1.DataSourceRequest
-	5,  // 18: weknora.plugin.v1.DataSourcePlugin.FetchIncremental:input_type -> weknora.plugin.v1.DataSourceRequest
-	5,  // 19: weknora.plugin.v1.DataSourcePlugin.FetchAllStream:input_type -> weknora.plugin.v1.DataSourceRequest
-	5,  // 20: weknora.plugin.v1.DataSourcePlugin.FetchIncrementalStream:input_type -> weknora.plugin.v1.DataSourceRequest
-	0,  // 21: weknora.plugin.v1.ParserPlugin.Handshake:input_type -> weknora.plugin.v1.HandshakeRequest
-	2,  // 22: weknora.plugin.v1.ParserPlugin.Health:input_type -> weknora.plugin.v1.HealthRequest
-	9,  // 23: weknora.plugin.v1.ParserPlugin.Parse:input_type -> weknora.plugin.v1.ParserRequest
-	0,  // 24: weknora.plugin.v1.WebSearchPlugin.Handshake:input_type -> weknora.plugin.v1.HandshakeRequest
-	2,  // 25: weknora.plugin.v1.WebSearchPlugin.Health:input_type -> weknora.plugin.v1.HealthRequest
-	12, // 26: weknora.plugin.v1.WebSearchPlugin.Search:input_type -> weknora.plugin.v1.WebSearchRequest
-	1,  // 27: weknora.plugin.v1.DataSourcePlugin.Handshake:output_type -> weknora.plugin.v1.HandshakeResponse
-	3,  // 28: weknora.plugin.v1.DataSourcePlugin.Health:output_type -> weknora.plugin.v1.HealthResponse
-	8,  // 29: weknora.plugin.v1.DataSourcePlugin.Validate:output_type -> weknora.plugin.v1.DataSourceResponse
-	8,  // 30: weknora.plugin.v1.DataSourcePlugin.ListResources:output_type -> weknora.plugin.v1.DataSourceResponse
-	8,  // 31: weknora.plugin.v1.DataSourcePlugin.ResolveResourceAncestors:output_type -> weknora.plugin.v1.DataSourceResponse
-	8,  // 32: weknora.plugin.v1.DataSourcePlugin.FetchAll:output_type -> weknora.plugin.v1.DataSourceResponse
-	8,  // 33: weknora.plugin.v1.DataSourcePlugin.FetchIncremental:output_type -> weknora.plugin.v1.DataSourceResponse
-	8,  // 34: weknora.plugin.v1.DataSourcePlugin.FetchAllStream:output_type -> weknora.plugin.v1.DataSourceResponse
-	8,  // 35: weknora.plugin.v1.DataSourcePlugin.FetchIncrementalStream:output_type -> weknora.plugin.v1.DataSourceResponse
-	1,  // 36: weknora.plugin.v1.ParserPlugin.Handshake:output_type -> weknora.plugin.v1.HandshakeResponse
-	3,  // 37: weknora.plugin.v1.ParserPlugin.Health:output_type -> weknora.plugin.v1.HealthResponse
-	11, // 38: weknora.plugin.v1.ParserPlugin.Parse:output_type -> weknora.plugin.v1.ParserResponse
-	1,  // 39: weknora.plugin.v1.WebSearchPlugin.Handshake:output_type -> weknora.plugin.v1.HandshakeResponse
-	3,  // 40: weknora.plugin.v1.WebSearchPlugin.Health:output_type -> weknora.plugin.v1.HealthResponse
-	14, // 41: weknora.plugin.v1.WebSearchPlugin.Search:output_type -> weknora.plugin.v1.WebSearchResponse
-	27, // [27:42] is the sub-list for method output_type
-	12, // [12:27] is the sub-list for method input_type
+	0,  // 12: weknora.plugin.v1.PluginControl.Handshake:input_type -> weknora.plugin.v1.HandshakeRequest
+	2,  // 13: weknora.plugin.v1.PluginControl.Health:input_type -> weknora.plugin.v1.HealthRequest
+	0,  // 14: weknora.plugin.v1.DataSourcePlugin.Handshake:input_type -> weknora.plugin.v1.HandshakeRequest
+	2,  // 15: weknora.plugin.v1.DataSourcePlugin.Health:input_type -> weknora.plugin.v1.HealthRequest
+	5,  // 16: weknora.plugin.v1.DataSourcePlugin.Validate:input_type -> weknora.plugin.v1.DataSourceRequest
+	5,  // 17: weknora.plugin.v1.DataSourcePlugin.ListResources:input_type -> weknora.plugin.v1.DataSourceRequest
+	5,  // 18: weknora.plugin.v1.DataSourcePlugin.ResolveResourceAncestors:input_type -> weknora.plugin.v1.DataSourceRequest
+	5,  // 19: weknora.plugin.v1.DataSourcePlugin.FetchAll:input_type -> weknora.plugin.v1.DataSourceRequest
+	5,  // 20: weknora.plugin.v1.DataSourcePlugin.FetchIncremental:input_type -> weknora.plugin.v1.DataSourceRequest
+	5,  // 21: weknora.plugin.v1.DataSourcePlugin.FetchAllStream:input_type -> weknora.plugin.v1.DataSourceRequest
+	5,  // 22: weknora.plugin.v1.DataSourcePlugin.FetchIncrementalStream:input_type -> weknora.plugin.v1.DataSourceRequest
+	0,  // 23: weknora.plugin.v1.ParserPlugin.Handshake:input_type -> weknora.plugin.v1.HandshakeRequest
+	2,  // 24: weknora.plugin.v1.ParserPlugin.Health:input_type -> weknora.plugin.v1.HealthRequest
+	9,  // 25: weknora.plugin.v1.ParserPlugin.Parse:input_type -> weknora.plugin.v1.ParserRequest
+	0,  // 26: weknora.plugin.v1.WebSearchPlugin.Handshake:input_type -> weknora.plugin.v1.HandshakeRequest
+	2,  // 27: weknora.plugin.v1.WebSearchPlugin.Health:input_type -> weknora.plugin.v1.HealthRequest
+	12, // 28: weknora.plugin.v1.WebSearchPlugin.Search:input_type -> weknora.plugin.v1.WebSearchRequest
+	1,  // 29: weknora.plugin.v1.PluginControl.Handshake:output_type -> weknora.plugin.v1.HandshakeResponse
+	3,  // 30: weknora.plugin.v1.PluginControl.Health:output_type -> weknora.plugin.v1.HealthResponse
+	1,  // 31: weknora.plugin.v1.DataSourcePlugin.Handshake:output_type -> weknora.plugin.v1.HandshakeResponse
+	3,  // 32: weknora.plugin.v1.DataSourcePlugin.Health:output_type -> weknora.plugin.v1.HealthResponse
+	8,  // 33: weknora.plugin.v1.DataSourcePlugin.Validate:output_type -> weknora.plugin.v1.DataSourceResponse
+	8,  // 34: weknora.plugin.v1.DataSourcePlugin.ListResources:output_type -> weknora.plugin.v1.DataSourceResponse
+	8,  // 35: weknora.plugin.v1.DataSourcePlugin.ResolveResourceAncestors:output_type -> weknora.plugin.v1.DataSourceResponse
+	8,  // 36: weknora.plugin.v1.DataSourcePlugin.FetchAll:output_type -> weknora.plugin.v1.DataSourceResponse
+	8,  // 37: weknora.plugin.v1.DataSourcePlugin.FetchIncremental:output_type -> weknora.plugin.v1.DataSourceResponse
+	8,  // 38: weknora.plugin.v1.DataSourcePlugin.FetchAllStream:output_type -> weknora.plugin.v1.DataSourceResponse
+	8,  // 39: weknora.plugin.v1.DataSourcePlugin.FetchIncrementalStream:output_type -> weknora.plugin.v1.DataSourceResponse
+	1,  // 40: weknora.plugin.v1.ParserPlugin.Handshake:output_type -> weknora.plugin.v1.HandshakeResponse
+	3,  // 41: weknora.plugin.v1.ParserPlugin.Health:output_type -> weknora.plugin.v1.HealthResponse
+	11, // 42: weknora.plugin.v1.ParserPlugin.Parse:output_type -> weknora.plugin.v1.ParserResponse
+	1,  // 43: weknora.plugin.v1.WebSearchPlugin.Handshake:output_type -> weknora.plugin.v1.HandshakeResponse
+	3,  // 44: weknora.plugin.v1.WebSearchPlugin.Health:output_type -> weknora.plugin.v1.HealthResponse
+	14, // 45: weknora.plugin.v1.WebSearchPlugin.Search:output_type -> weknora.plugin.v1.WebSearchResponse
+	29, // [29:46] is the sub-list for method output_type
+	12, // [12:29] is the sub-list for method input_type
 	12, // [12:12] is the sub-list for extension type_name
 	12, // [12:12] is the sub-list for extension extendee
 	0,  // [0:12] is the sub-list for field type_name
@@ -1348,7 +1373,7 @@ func file_plugin_proto_init() {
 			NumEnums:      0,
 			NumMessages:   20,
 			NumExtensions: 0,
-			NumServices:   3,
+			NumServices:   4,
 		},
 		GoTypes:           file_plugin_proto_goTypes,
 		DependencyIndexes: file_plugin_proto_depIdxs,

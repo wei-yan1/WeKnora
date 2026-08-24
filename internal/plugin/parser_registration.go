@@ -45,9 +45,9 @@ func RegisterExternalParser(manager *Manager, manifest Manifest, runtime Runtime
 	if manifest.ExtensionType != ExtensionParser {
 		return fmt.Errorf("plugin %q is not a parser", manifest.ID)
 	}
-	provider, ok := runtime.(parserClientProvider)
+	provider, ok := runtime.(connProvider)
 	if !ok {
-		return fmt.Errorf("runtime for parser %q does not expose a gRPC client", manifest.ID)
+		return fmt.Errorf("runtime for parser %q does not expose a gRPC connection", manifest.ID)
 	}
 	if err := manager.Register(manifest, runtime); err != nil {
 		return err
@@ -79,14 +79,10 @@ func UnregisterExternalParser(descriptor ParserDescriptor) {
 
 type externalParserRegistration struct {
 	descriptor ParserDescriptor
-	provider   parserClientProvider
+	provider   connProvider
 	start      func(context.Context) error
 	manager    *Manager
 	pluginID   string
-}
-
-type parserClientProvider interface {
-	ParserClient() (pluginapi.ParserPluginClient, bool)
 }
 
 func (r externalParserRegistration) Name() string        { return r.descriptor.EngineName }
@@ -95,8 +91,7 @@ func (r externalParserRegistration) FileTypes(bool) []string {
 	return append([]string(nil), r.descriptor.FileTypes...)
 }
 func (r externalParserRegistration) CheckAvailable(bool, map[string]string) (bool, string) {
-	_, ok := r.provider.ParserClient()
-	if !ok {
+	if r.provider.Conn() == nil {
 		return false, "parser plugin is not running"
 	}
 	return true, ""
@@ -105,11 +100,11 @@ func (r externalParserRegistration) NewReader(ctx context.Context, _ docparser.R
 	if err := r.start(ctx); err != nil {
 		return nil, err
 	}
-	client, ok := r.provider.ParserClient()
-	if !ok {
+	conn := r.provider.Conn()
+	if conn == nil {
 		return nil, fmt.Errorf("parser plugin %q is not running", r.descriptor.EngineName)
 	}
-	return &GRPCParserProxy{Client: client, Manager: r.manager, PluginID: r.pluginID}, nil
+	return &GRPCParserProxy{Client: pluginapi.NewParserPluginClient(conn), Manager: r.manager, PluginID: r.pluginID}, nil
 }
 
 var _ docparser.EngineRegistration = externalParserRegistration{}

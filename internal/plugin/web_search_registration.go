@@ -11,10 +11,6 @@ import (
 	"github.com/Tencent/WeKnora/pkg/pluginapi"
 )
 
-type webSearchClientProvider interface {
-	WebSearchClient() (pluginapi.WebSearchPluginClient, bool)
-}
-
 // RegisterExternalWebSearch connects a lifecycle runtime to the existing
 // tenant-scoped web search registry. Provider parameters are kept at the
 // factory boundary, so one long-lived plugin process can serve many tenants
@@ -32,9 +28,9 @@ func RegisterExternalWebSearch(
 	if registry == nil {
 		return "", fmt.Errorf("web search registry is nil")
 	}
-	provider, ok := runtime.(webSearchClientProvider)
+	provider, ok := runtime.(connProvider)
 	if !ok {
-		return "", fmt.Errorf("runtime for web search plugin %q does not expose a gRPC client", manifest.ID)
+		return "", fmt.Errorf("runtime for web search plugin %q does not expose a gRPC connection", manifest.ID)
 	}
 
 	providerType := manifest.ID
@@ -52,10 +48,11 @@ func RegisterExternalWebSearch(
 				return nil, err
 			}
 		}
-		client, ok := provider.WebSearchClient()
-		if !ok {
+		conn := provider.Conn()
+		if conn == nil {
 			return nil, fmt.Errorf("web search plugin %q is not running", manifest.ID)
 		}
+		client := pluginapi.NewWebSearchPluginClient(conn)
 		return &GRPCWebSearchProxy{Client: client, Params: params, NameValue: providerType, Manager: manager, PluginID: manifest.ID}, nil
 	}, webSearchProviderTypeInfo(manifest, providerType)); err != nil {
 		_ = manager.Unregister(context.Background(), manifest.ID)

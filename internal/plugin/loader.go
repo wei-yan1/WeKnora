@@ -22,29 +22,20 @@ func LoadExternal(ctx context.Context, roots []string, manager *Manager, registr
 // LoadExternalWithRegistries is the full v1 loader. Datasource and parser
 // packages can be loaded with the legacy LoadExternal helper; a host that also
 // exposes external web-search providers supplies the web-search registry.
+//
+// Extension-specific registration is delegated to an ExtensionAdapterRegistry,
+// so adding a new extension type requires registering a new adapter rather than
+// adding a switch case here.
 func LoadExternalWithRegistries(ctx context.Context, roots []string, manager *Manager, registry *datasource.ConnectorRegistry, searchRegistry *infraWebSearch.Registry) error {
 	packages, err := DiscoverPackages(roots)
 	if err != nil {
 		return err
 	}
-	loaded := make([]struct {
-		id            string
-		connectorType string
-		parserName    string
-		searchType    string
-	}, 0, len(packages))
+	adapters := NewExtensionAdapterRegistry(registry, searchRegistry)
+	loaded := make([]loadedAdapter, 0, len(packages))
 	cleanup := func() {
 		for i := len(loaded) - 1; i >= 0; i-- {
-			if loaded[i].connectorType != "" {
-				registry.UnregisterFactory(loaded[i].connectorType)
-				datasource.UnregisterExternalConnectorMetadata(loaded[i].connectorType)
-			}
-			if loaded[i].parserName != "" {
-				UnregisterExternalParser(ParserDescriptor{EngineName: loaded[i].parserName})
-			}
-			if loaded[i].searchType != "" && searchRegistry != nil {
-				searchRegistry.Unregister(loaded[i].searchType)
-			}
+			loaded[i].adapter.Unregister(loaded[i].handle)
 			_ = manager.Unregister(context.Background(), loaded[i].id)
 		}
 	}
@@ -64,44 +55,30 @@ func LoadExternalWithRegistries(ctx context.Context, roots []string, manager *Ma
 			}
 			runtime = NewProcessRuntime(manifest, entrypoint)
 		}
-		var connectorType, parserName, searchType string
-		switch manifest.ExtensionType {
-		case ExtensionDataSource:
-			connectorType, err = RegisterExternalDataSource(manager, registry, manifest, runtime, false)
-		case ExtensionParser:
-			descriptor, descriptorErr := ParserDescriptorFromManifest(manifest)
-			if descriptorErr != nil {
-				cleanup()
-				return descriptorErr
-			}
-			err = RegisterExternalParser(manager, manifest, runtime, descriptor, false)
-			parserName = descriptor.EngineName
-		case ExtensionSearch:
-			if searchRegistry == nil {
-				cleanup()
-				return fmt.Errorf("web search plugin %q requires a web search registry", manifest.ID)
-			}
-			searchType, err = RegisterExternalWebSearch(manager, searchRegistry, manifest, runtime, false)
-		default:
+		adapter, ok := adapters.Get(manifest.ExtensionType)
+		if !ok {
 			cleanup()
-			return fmt.Errorf("plugin %q uses extension_type %q, but the v1 external protocol does not implement it yet", manifest.ID, manifest.ExtensionType)
+			return fmt.Errorf("plugin %q uses extension_type %q, but no adapter is registered for it", manifest.ID, manifest.ExtensionType)
 		}
+		handle, err := adapter.Register(manager, manifest, runtime)
 		if err != nil {
 			cleanup()
 			return err
 		}
-		loaded = append(loaded, struct {
-			id            string
-			connectorType string
-			parserName    string
-			searchType    string
-		}{manifest.ID, connectorType, parserName, searchType})
+		loaded = append(loaded, loadedAdapter{id: manifest.ID, adapter: adapter, handle: handle})
 		if err := manager.Start(ctx, manifest.ID); err != nil {
 			cleanup()
 			return err
 		}
 	}
 	return nil
+}
+
+// loadedAdapter records a completed load for rollback on partial failure.
+type loadedAdapter struct {
+	id      string
+	adapter ExtensionAdapter
+	handle  adapterHandle
 }
 
 func LoadExternalFromEnv(ctx context.Context, manager *Manager, registry *datasource.ConnectorRegistry) error {

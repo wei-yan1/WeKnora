@@ -15,7 +15,7 @@ import (
 )
 
 type webSearchTestRuntime struct {
-	client pluginapi.WebSearchPluginClient
+	conn *grpc.ClientConn
 }
 
 func (r *webSearchTestRuntime) Start(context.Context) error { return nil }
@@ -23,8 +23,8 @@ func (r *webSearchTestRuntime) Stop(context.Context) error  { return nil }
 func (r *webSearchTestRuntime) Health(context.Context) HealthStatus {
 	return HealthStatus{State: StateRunning, CheckedAt: time.Now().UTC()}
 }
-func (r *webSearchTestRuntime) WebSearchClient() (pluginapi.WebSearchPluginClient, bool) {
-	return r.client, r.client != nil
+func (r *webSearchTestRuntime) Conn() *grpc.ClientConn {
+	return r.conn
 }
 
 func TestExternalWebSearchRegistrationUsesTenantScopedFactory(t *testing.T) {
@@ -53,7 +53,7 @@ func TestExternalWebSearchRegistrationUsesTenantScopedFactory(t *testing.T) {
 	manifest := Manifest{APIVersion: APIVersionV1, ID: "test.external-search", Name: "External Search", Version: "1.0.0", ExtensionType: ExtensionSearch, ProtocolVersion: ProtocolVersionV1, Capabilities: []string{"search"}}
 	manager := NewManager("")
 	registry := infraWebSearch.NewRegistry()
-	providerType, err := RegisterExternalWebSearch(manager, registry, manifest, &webSearchTestRuntime{client: pluginapi.NewWebSearchPluginClient(conn)}, false)
+	providerType, err := RegisterExternalWebSearch(manager, registry, manifest, &webSearchTestRuntime{conn: conn}, false)
 	require.NoError(t, err)
 	require.Equal(t, manifest.ID, providerType)
 	t.Cleanup(func() { _ = manager.Unregister(context.Background(), manifest.ID); registry.Unregister(providerType) })

@@ -701,17 +701,18 @@ interface SchemaFieldVM {
   kind: 'string' | 'array' | 'boolean' | 'number'
   required: boolean
   secret: boolean
+  default?: unknown
 }
 
-// Parse the plugin's config_schema (properties.settings) into form fields.
-const schemaFields = computed<SchemaFieldVM[]>(() => {
-  const schema = currentDef.value?.configSchema
-  if (!schema) return []
-  const settings = (schema as any).properties?.settings
-  if (!settings?.properties) return []
-  const required: string[] = Array.isArray(settings.required) ? settings.required : []
+// Parse one JSON-Schema "properties" object into form fields. Shared by the
+// settings and credentials sections so the two config maps render identically.
+function parseSchemaProperties(
+  schema: Record<string, any> | undefined,
+): SchemaFieldVM[] {
+  if (!schema?.properties) return []
+  const required: string[] = Array.isArray(schema.required) ? schema.required : []
   const fields: SchemaFieldVM[] = []
-  for (const [key, raw] of Object.entries(settings.properties as Record<string, any>)) {
+  for (const [key, raw] of Object.entries(schema.properties as Record<string, any>)) {
     const type = raw?.type
     let kind: SchemaFieldVM['kind'] = 'string'
     if (type === 'boolean') kind = 'boolean'
@@ -724,9 +725,26 @@ const schemaFields = computed<SchemaFieldVM[]>(() => {
       kind,
       required: required.includes(key),
       secret: !!raw?.secret,
+      default: raw?.default,
     })
   }
   return fields
+}
+
+// Parse the plugin's config_schema (properties.settings) into form fields.
+const schemaFields = computed<SchemaFieldVM[]>(() => {
+  const schema = currentDef.value?.configSchema
+  if (!schema) return []
+  return parseSchemaProperties((schema as any).properties?.settings)
+})
+
+// Parse the plugin's config_schema (properties.credentials) into credential
+// fields. This is what lets an external plugin (DingTalk, GitHub, Confluence)
+// surface client_id / client_secret / operator_id without any frontend code.
+const schemaCredentialFields = computed<SchemaFieldVM[]>(() => {
+  const schema = currentDef.value?.configSchema
+  if (!schema) return []
+  return parseSchemaProperties((schema as any).properties?.credentials)
 })
 
 function schemaDefaultSettings(def: ConnectorDef | undefined): Record<string, any> {
@@ -738,6 +756,42 @@ function schemaDefaultSettings(def: ConnectorDef | undefined): Record<string, an
   }
   return defaults
 }
+
+// Default credential values from the schema. Only non-secret fields get a
+// default pre-filled (secrets never carry a default in practice, but guard
+// anyway so a default never leaks into a password field).
+function schemaDefaultCredentials(def: ConnectorDef | undefined): Record<string, any> {
+  const properties = (def?.configSchema as any)?.properties?.credentials?.properties
+  if (!properties) return {}
+  const defaults: Record<string, any> = {}
+  for (const [key, raw] of Object.entries(properties as Record<string, any>)) {
+    if (raw && raw.default !== undefined && !raw.secret) defaults[key] = raw.default
+  }
+  return defaults
+}
+
+// Validate required external-plugin credential fields. Mirrors
+// validateExternalSchemaFields but reads from the credentials map.
+function validateExternalCredentialFields(): boolean {
+  for (const field of schemaCredentialFields.value) {
+    if (!field.required) continue
+    const value = (form.value.config.credentials as any)?.[field.key]
+    const empty = field.kind === 'array'
+      ? !Array.isArray(value) || value.length === 0
+      : value === undefined || value === null || (typeof value === 'string' && !value.trim())
+    if (empty) {
+      MessagePlugin.warning(`${field.label} ${t('datasource.isRequired')}`)
+      return false
+    }
+  }
+  return true
+}
+
+// Whether this external plugin declares any credential field. When false the
+// plugin (e.g. LocalDir) has no credentials and skips the credential step.
+const externalHasCredentials = computed(
+  () => schemaCredentialFields.value.length > 0,
+)
 
 function validateExternalSchemaFields(): boolean {
   for (const field of schemaFields.value) {
@@ -894,7 +948,7 @@ function selectType(def: ConnectorDef) {
   form.value.type = def.type
   form.value.config.type = def.type
   form.value.name = connectorName(def)
-  form.value.config.credentials = {}
+  form.value.config.credentials = def.external ? schemaDefaultCredentials(def) : {}
   form.value.config.settings = def.external ? schemaDefaultSettings(def) : {}
   if (isGitLabConnector(def.type)) addGitLabProject()
   rssAuthHeaders.value = []
@@ -906,12 +960,16 @@ async function testConnection() {
   syncRssAuthHeadersToCredentials()
   if (!validateRssFeedUrls()) return
   if (!isEdit.value || !credentialsConfigured.value || replaceCredentialsMode.value) {
-    const fields = currentDef.value?.fields || []
-    for (const f of fields) {
-      if (f.optional || f.fieldType === 'custom_headers') continue
-      if (!form.value.config.credentials[f.key]) {
-        MessagePlugin.warning(`${t(f.labelKey)} ${t('datasource.isRequired')}`)
-        return
+    if (currentDef.value?.external) {
+      if (!validateExternalCredentialFields()) return
+    } else {
+      const fields = currentDef.value?.fields || []
+      for (const f of fields) {
+        if (f.optional || f.fieldType === 'custom_headers') continue
+        if (!form.value.config.credentials[f.key]) {
+          MessagePlugin.warning(`${t(f.labelKey)} ${t('datasource.isRequired')}`)
+          return
+        }
       }
     }
   }
@@ -1117,7 +1175,16 @@ async function nextStep() {
   if (step.value === 1) {
     if (currentDef.value?.external) {
       if (!validateExternalSchemaFields()) return
-      // 外部插件：Schema 表单已填写，无需凭证/连接测试/资源选择，直接到同步策略
+      // 外部插件：settings 已通过 Schema 校验。若声明了凭证字段，则要求
+      // 连接测试通过（凭证走 /validate-credentials 与内置连接器一致）；
+      // 无凭证的插件（如 LocalDir）跳过凭证步骤，直接到同步策略。
+      if (externalHasCredentials.value) {
+        if (!validateExternalCredentialFields()) return
+        if (needsConnectionTest() && testResult.value !== 'success') {
+          await testConnection()
+          if ((testResult.value as string) !== 'success') return
+        }
+      }
       step.value = 3
       return
     }
@@ -1453,7 +1520,7 @@ const drawerConfirmText = computed(() => {
 
     <!-- Step 1: Credentials -->
     <template v-if="step === 1">
-      <!-- 外部插件：通用 Schema 表单（无需凭证） -->
+      <!-- 外部插件：通用 Schema 表单（settings + 可选 credentials） -->
       <template v-if="currentDef?.external">
         <section class="setting-drawer__section">
           <h4 class="setting-drawer__section-title">{{ t('datasource.sectionBasic') }}</h4>
@@ -1477,6 +1544,96 @@ const drawerConfirmText = computed(() => {
             <t-input-number v-else-if="field.kind === 'number'" v-model="form.config.settings[field.key]" />
             <p v-if="field.description" class="form-desc">{{ field.description }}</p>
           </div>
+        </section>
+
+        <!-- 外部插件凭证：由 config_schema.properties.credentials 动态渲染。
+             编辑时已保存的敏感字段只显示“已配置”，不回显明文；
+             替换时走 /credentials 子资源，空值不会覆盖原凭证。 -->
+        <section v-if="externalHasCredentials" class="setting-drawer__section">
+          <h4 class="setting-drawer__section-title">{{ t('datasource.credentialsLabel') }}</h4>
+
+          <div v-if="isEdit && credentialsConfigured && !replaceCredentialsMode" class="form-item">
+            <div
+              class="credential-faux-input"
+              :class="{ 'is-confirm-remove': pendingRemoveCredentials }"
+              :title="pendingRemoveCredentials ? '' : t('credential.configured')"
+            >
+              <template v-if="pendingRemoveCredentials">
+                <t-icon name="error-circle-filled" class="credential-status-icon warn" />
+                <span class="credential-faux-text danger">{{ t('credential.confirmRemovePrompt') }}</span>
+                <div class="credential-actions">
+                  <t-button size="small" variant="text" @click="cancelPendingRemoveCredentials">
+                    {{ t('common.cancel') }}
+                  </t-button>
+                  <span class="action-divider" />
+                  <t-button
+                    size="small"
+                    variant="text"
+                    theme="danger"
+                    :loading="removingCredentials"
+                    @click="confirmRemoveCredentials"
+                  >
+                    {{ t('credential.confirmRemove') }}
+                  </t-button>
+                </div>
+              </template>
+              <template v-else>
+                <t-icon name="check-circle-filled" class="credential-status-icon success" />
+                <span class="credential-faux-text">{{ t('credential.configured') }}</span>
+                <div class="credential-actions">
+                  <t-button size="small" variant="text" @click="enterReplaceCredentials">
+                    {{ t('credential.update') }}
+                  </t-button>
+                  <span class="action-divider" />
+                  <t-button size="small" variant="text" theme="danger" @click="requestRemoveCredentials">
+                    {{ t('credential.remove') }}
+                  </t-button>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <div
+            v-else-if="isEdit && !credentialsConfigured && !replaceCredentialsMode"
+            class="form-item"
+          >
+            <div class="credential-faux-input is-empty" @click="enterReplaceCredentials">
+              <t-icon name="lock-on" class="credential-status-icon muted" />
+              <span class="credential-faux-text muted">{{ t('credential.unconfigured') }}</span>
+              <div class="credential-actions">
+                <t-button size="small" variant="text" theme="primary" @click.stop="enterReplaceCredentials">
+                  {{ t('credential.configure') }}
+                </t-button>
+              </div>
+            </div>
+          </div>
+
+          <template v-else>
+            <div
+              v-for="field in schemaCredentialFields"
+              :key="field.key"
+              class="form-item"
+            >
+              <label class="form-label" :class="{ required: field.required }">
+                {{ field.label }}
+              </label>
+              <t-input
+                v-model="form.config.credentials[field.key]"
+                :type="field.secret ? 'password' : 'text'"
+                :placeholder="field.description"
+                autocomplete="off"
+                spellcheck="false"
+              >
+                <template v-if="field.secret" #prefix-icon><t-icon name="lock-on" /></template>
+              </t-input>
+              <p v-if="field.description" class="form-desc">{{ field.description }}</p>
+            </div>
+            <div v-if="isEdit && replaceCredentialsMode" class="credential-edit-actions">
+              <t-button size="small" variant="text" @click="cancelReplaceCredentials">
+                {{ t('common.cancel') }}
+              </t-button>
+            </div>
+          </template>
         </section>
       </template>
 

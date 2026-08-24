@@ -19,7 +19,7 @@ type ParserConformanceReport struct {
 
 // RunParserConformance is the minimal smoke test for an external parser
 // plugin. It verifies the handshake, health endpoint and one Parse call.
-func RunParserConformance(ctx context.Context, client ParserPluginClient, request ParserRequest) ParserConformanceReport {
+func RunParserConformance(ctx context.Context, control PluginControlClient, client ParserPluginClient, request ParserRequest) ParserConformanceReport {
 	started := time.Now()
 	report := ParserConformanceReport{}
 	appendError := func(err error) {
@@ -28,7 +28,7 @@ func RunParserConformance(ctx context.Context, client ParserPluginClient, reques
 		}
 	}
 
-	handshake, err := client.Handshake(ctx, &pluginproto.HandshakeRequest{})
+	handshake, err := control.Handshake(ctx, &pluginproto.HandshakeRequest{})
 	if err == nil {
 		var value HandshakeResponse
 		err = DecodeHandshake(handshake, &value)
@@ -40,7 +40,7 @@ func RunParserConformance(ctx context.Context, client ParserPluginClient, reques
 		appendError(fmt.Errorf("invalid handshake response"))
 	}
 
-	health, err := client.Health(ctx, &pluginproto.HealthRequest{})
+	health, err := control.Health(ctx, &pluginproto.HealthRequest{})
 	if err == nil {
 		var value HealthResponse
 		err = DecodeHealth(health, &value)

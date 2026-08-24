@@ -20,7 +20,7 @@ type WebSearchConformanceReport struct {
 // RunWebSearchConformance is the SDK-level smoke test for an external search
 // plugin. It deliberately uses a caller-provided request so it works for both
 // keyless and credentialed providers.
-func RunWebSearchConformance(ctx context.Context, client WebSearchPluginClient, request WebSearchRequest) WebSearchConformanceReport {
+func RunWebSearchConformance(ctx context.Context, control PluginControlClient, client WebSearchPluginClient, request WebSearchRequest) WebSearchConformanceReport {
 	started := time.Now()
 	report := WebSearchConformanceReport{}
 	appendError := func(err error) {
@@ -29,7 +29,7 @@ func RunWebSearchConformance(ctx context.Context, client WebSearchPluginClient, 
 		}
 	}
 
-	handshake, err := client.Handshake(ctx, &pluginproto.HandshakeRequest{})
+	handshake, err := control.Handshake(ctx, &pluginproto.HandshakeRequest{})
 	if err == nil {
 		var value HandshakeResponse
 		err = DecodeHandshake(handshake, &value)
@@ -41,7 +41,7 @@ func RunWebSearchConformance(ctx context.Context, client WebSearchPluginClient, 
 		appendError(fmt.Errorf("invalid handshake response"))
 	}
 
-	health, err := client.Health(ctx, &pluginproto.HealthRequest{})
+	health, err := control.Health(ctx, &pluginproto.HealthRequest{})
 	if err == nil {
 		var value HealthResponse
 		err = DecodeHealth(health, &value)

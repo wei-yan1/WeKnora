@@ -86,7 +86,7 @@ type ParserHandler struct {
 }
 
 func (h ParserHandler) Handshake(context.Context, *pluginproto.HandshakeRequest) (*pluginproto.HandshakeResponse, error) {
-	return EncodeHandshake(HandshakeResponse{ProtocolVersion: ProtocolVersionV1, PluginID: h.PluginID, Capabilities: h.Capabilities}), nil
+	return EncodeHandshake(HandshakeResponse{ProtocolVersion: ProtocolVersionV1, PluginID: h.PluginID, Capabilities: h.Capabilities, ExtensionType: ExtensionTypeParser, Services: []string{ExtensionTypeParser}}), nil
 }
 func (h ParserHandler) Health(ctx context.Context, _ *pluginproto.HealthRequest) (*pluginproto.HealthResponse, error) {
 	v := HealthResponse{State: "running"}
@@ -110,5 +110,8 @@ func (h ParserHandler) Parse(ctx context.Context, v *pluginproto.ParserRequest) 
 	return EncodeParserResponse(out), nil
 }
 func ServeParser(ctx context.Context, address string, handler ParserHandler, opts ...grpc.ServerOption) error {
-	return servePlugin(ctx, address, opts, func(s *grpc.Server) { RegisterParserPluginServer(s, handler) })
+	return servePlugin(ctx, address, opts, func(s *grpc.Server) {
+		RegisterPluginControlServer(s, handler)
+		RegisterParserPluginServer(s, handler)
+	})
 }

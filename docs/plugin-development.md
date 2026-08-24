@@ -50,7 +50,7 @@ permissions:
 - 数据源使用 `DataSourceRequest` / `DataSourceResponse`；
 - 解析器使用 `ParserRequest` / `ParserResponse`；
 - 网络搜索使用 `WebSearchRequest` / `WebSearchResponse`；
-- 生命周期使用 `HandshakeRequest`、`HandshakeResponse`、`HealthRequest`、`HealthResponse`；
+- 握手与健康检查统一由 `PluginControl` service 承载（所有扩展类型通用），使用 `HandshakeRequest`、`HandshakeResponse`、`HealthRequest`、`HealthResponse`；业务 service（`DataSourcePlugin` / `ParserPlugin` / `WebSearchPlugin`）只负责各自的业务方法，不再包含 Handshake/Health；
 - `DataSourceRequest.config` 在 v1 仍使用 `google.protobuf.Struct`，但宿主会依据 Manifest 的 `config_schema`（或兼容的 `config` 列表）在请求发出前做必填项、类型和枚举校验，插件作者不需要猜字段；
 - `DataSourceResponse.cursor` 使用 `Cursor.data` 的 `bytes`，由插件自行编码和解码，推荐 JSON 或 protobuf 私有消息。
 - `FetchedItem.updated_at` 使用 RFC3339/RFC3339Nano 字符串传输；格式错误会被宿主拒绝，不再静默替换为当前时间。后续协议版本会增加原生 protobuf Timestamp 字段，v1 插件继续兼容当前字段。
@@ -176,7 +176,7 @@ $env:WEKNORA_PLUGIN_DIRS = "D:\weknora-plugins"
 
 多个目录可用 Windows 的 `;` 分隔。每个目录下可以放多个独立插件包；同一个 `id` 重复时主程序会拒绝启动，避免加载顺序造成歧义。
 
-第三方作者可以使用 SDK 的 `pluginapi.RunDataSourceConformance` 对已经连接的 gRPC client 做握手、健康、校验、全量和增量接口的冒烟测试。验收时还要检查：首次同步有 N 个文件，改动一个文件后插件只返回该文件，主流程的 parser/embedding/index 计数也只增加该文件对应的批次。
+第三方作者可以使用 SDK 的 `pluginapi.RunDataSourceConformance` 对已经连接的 gRPC client 做握手、健康、校验、全量和增量接口的冒烟测试。该函数签名要求分别传入控制面 client（`PluginControlClient`，负责握手与健康检查）和业务 client（`DataSourcePluginClient`，负责校验/同步），两个 client 共享同一个 gRPC 连接。验收时还要检查：首次同步有 N 个文件，改动一个文件后插件只返回该文件，主流程的 parser/embedding/index 计数也只增加该文件对应的批次。
 
 流式插件还应验证：同步过程中收到多个响应批次；每个 cursor 都能被重新传给插件；在 checkpoint 后模拟进程中断，重启后不会重复处理已经确认的项目，也不会漏掉未确认项目。
 
@@ -293,7 +293,7 @@ pluginapi.ServeParser(ctx, address, pluginapi.ParserHandler{
 
 Parser 插件的最小验证建议使用两层检查：
 
-1. SDK 级烟雾测试：用 `pluginapi.RunParserConformance` 跑握手、健康检查和一次 Parse；
+1. SDK 级烟雾测试：用 `pluginapi.RunParserConformance` 跑握手、健康检查和一次 Parse（分别传入控制面 client 与 Parser 业务 client）；
 2. 宿主级集成测试：让 WeKnora 通过 `LoadExternal` 加载插件，然后用 `docparser.NewReader(...)` 读一份样本文档，确认结果进入后续的切块 / 向量化 / 索引链路。
 
 ## 7. Web Search 插件（网络搜索引擎扩展）
@@ -339,7 +339,7 @@ pluginapi.ServeWebSearch(ctx, address, pluginapi.WebSearchHandler{
 
 ### 7.4 验证方式
 
-1. 用 `pluginapi` 客户端执行 Handshake、Health、Search 烟雾测试；
+1. SDK 级烟雾测试：用 `pluginapi.RunWebSearchConformance` 跑握手、健康检查和一次 Search（分别传入控制面 client 与 WebSearch 业务 client）；
 2. 用 `LoadExternalWithRegistries` 加载外部包；
 3. 通过 `Registry.CreateProvider(provider_type, tenantParams)` 创建实例；
 4. 执行 `Search`，确认 API Key 等参数只属于当前请求；

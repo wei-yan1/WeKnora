@@ -16,7 +16,7 @@ func TestWebSearchPluginGRPCContract(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	server := grpc.NewServer()
-	RegisterWebSearchPluginServer(server, WebSearchHandler{
+	handler := WebSearchHandler{
 		PluginID:     "test.search",
 		Capabilities: []string{"search"},
 		OnSearch: func(_ context.Context, request WebSearchRequest) (WebSearchResponse, error) {
@@ -28,7 +28,9 @@ func TestWebSearchPluginGRPCContract(t *testing.T) {
 				PublishedAt: "2026-08-22T00:00:00Z",
 			}}}, nil
 		},
-	})
+	}
+	RegisterPluginControlServer(server, handler)
+	RegisterWebSearchPluginServer(server, handler)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 
@@ -38,13 +40,14 @@ func TestWebSearchPluginGRPCContract(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Close()
 	client := NewWebSearchPluginClient(conn)
+	control := NewPluginControlClient(conn)
 
-	handshakeWire, err := client.Handshake(ctx, &pluginproto.HandshakeRequest{})
+	handshakeWire, err := control.Handshake(ctx, &pluginproto.HandshakeRequest{})
 	require.NoError(t, err)
 	var handshake HandshakeResponse
 	require.NoError(t, DecodeHandshake(handshakeWire, &handshake))
 	require.Equal(t, "test.search", handshake.PluginID)
-	report := RunWebSearchConformance(ctx, client, WebSearchRequest{Query: "weknora", MaxResults: 3})
+	report := RunWebSearchConformance(ctx, control, client, WebSearchRequest{Query: "weknora", MaxResults: 3})
 	require.True(t, report.HandshakeOK)
 	require.True(t, report.HealthOK)
 	require.True(t, report.SearchOK)
