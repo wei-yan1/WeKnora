@@ -320,9 +320,13 @@ func (h *WebSearchProviderHandler) DeleteProvider(c *gin.Context) {
 // @Security     ApiKeyAuth
 // @Router       /web-search-providers/types [get]
 func (h *WebSearchProviderHandler) ListProviderTypes(c *gin.Context) {
+	providerTypes := types.GetWebSearchProviderTypes()
+	if h.registry != nil {
+		providerTypes = append(providerTypes, h.registry.ListTypeInfos()...)
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"data":    types.GetWebSearchProviderTypes(),
+		"data":    providerTypes,
 	})
 }
 

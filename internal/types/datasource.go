@@ -50,6 +50,7 @@ const (
 	DataSourceStatusDeleted = "deleted"
 
 	// Sync log status
+	SyncLogStatusPending  = "pending"
 	SyncLogStatusRunning  = "running"
 	SyncLogStatusSuccess  = "success"
 	SyncLogStatusPartial  = "partial"
@@ -184,6 +185,15 @@ type SyncLog struct {
 
 	// Detailed sync result (JSON-encoded)
 	Result JSON `json:"result" gorm:"type:jsonb"`
+
+	// Durable outbox fields. A pending SyncLog is the source of truth for one
+	// queue delivery; dispatch may be retried safely with the same per-run TaskID.
+	TaskID            string     `json:"task_id,omitempty" gorm:"type:varchar(255);index"`
+	TaskPayload       JSON       `json:"-" gorm:"type:jsonb"`
+	DispatchedAt      *time.Time `json:"dispatched_at,omitempty"`
+	DispatchAttempts  int        `json:"dispatch_attempts,omitempty"`
+	NextDispatchAt    *time.Time `json:"next_dispatch_at,omitempty" gorm:"index"`
+	LastDispatchError string     `json:"last_dispatch_error,omitempty" gorm:"type:text"`
 
 	// Creation timestamp (usually same as StartedAt)
 	CreatedAt time.Time `json:"created_at"`

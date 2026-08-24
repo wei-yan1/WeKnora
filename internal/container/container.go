@@ -84,6 +84,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/models/embedding"
 	"github.com/Tencent/WeKnora/internal/models/limiter"
 	"github.com/Tencent/WeKnora/internal/models/utils/ollama"
+	pluginPkg "github.com/Tencent/WeKnora/internal/plugin"
 	"github.com/Tencent/WeKnora/internal/router"
 	"github.com/Tencent/WeKnora/internal/storageallowlist"
 	"github.com/Tencent/WeKnora/internal/stream"
@@ -249,6 +250,10 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	// Web search service (needed by AgentService)
 	logger.Debugf(ctx, "[Container] Registering web search registry and providers...")
 	must(container.Provide(infra_web_search.NewRegistry))
+	// plugin.Manager is needed by registerWebSearchProviders (RegisterBuiltinWebSearch),
+	// so it must be provided before the Invoke below. It is the single shared
+	// plugin control-plane instance; later wiring blocks reuse the same one.
+	must(container.Provide(func() *pluginPkg.Manager { return pluginPkg.NewManager("") }))
 	must(container.Invoke(registerWebSearchProviders))
 	must(container.Provide(repository.NewWebSearchProviderRepository))
 	must(container.Provide(repository.NewVectorStoreRepository))
@@ -344,10 +349,17 @@ func BuildContainer(container *dig.Container) *dig.Container {
 
 	// Data source sync framework
 	logger.Debugf(ctx, "[Container] Registering data source sync framework...")
+	// *plugin.Manager is provided earlier (before registerWebSearchProviders);
+	// reuse the same singleton so built-in and external plugins share one
+	// control plane instead of registering a second manager.
 	must(container.Provide(initConnectorRegistry))
-	must(container.Provide(datasource.NewScheduler))
+	must(container.Invoke(startBuiltinPlugins))
+	must(container.Invoke(loadExternalPlugins))
+	must(container.Provide(datasource.NewSyncCoordinator))
+	must(container.Provide(datasource.NewSchedulerWithCoordinator))
 	must(container.Provide(service.NewDataSourceService))
 	must(container.Invoke(startDataSourceScheduler))
+	must(container.Invoke(startPluginHealthSupervisor))
 	logger.Debugf(ctx, "[Container] Data source sync framework registered")
 	must(container.Invoke(startAuditLogRetention))
 	logger.Debugf(ctx, "[Container] Audit log retention runner registered")
@@ -1593,7 +1605,7 @@ func NewDuckDB() (*sql.DB, error) {
 // registerWebSearchProviders registers all web search provider types to the registry.
 // Each provider type is registered with its factory function that accepts parameters.
 // Provider instances are created on-demand when tenants configure them.
-func registerWebSearchProviders(registry *infra_web_search.Registry) {
+func registerWebSearchProviders(registry *infra_web_search.Registry, manager *pluginPkg.Manager) error {
 	registry.Register("duckduckgo", infra_web_search.NewDuckDuckGoProvider)
 	registry.Register("google", infra_web_search.NewGoogleProvider)
 	registry.Register("bing", infra_web_search.NewBingProvider)
@@ -1605,6 +1617,7 @@ func registerWebSearchProviders(registry *infra_web_search.Registry) {
 	registry.Register("zhipu", infra_web_search.NewZhipuProvider)
 	registry.Register("exa", infra_web_search.NewExaProvider)
 	registry.Register("metaso", infra_web_search.NewMetasoProvider)
+	return pluginPkg.RegisterBuiltinWebSearch(manager, registry)
 }
 
 // registerIMService registers adapter factories, loads enabled channels, and
@@ -1637,7 +1650,7 @@ func registerIMService(imService *imPkg.Service, cleaner interfaces.ResourceClea
 // initConnectorRegistry creates and populates the connector registry with all available connectors.
 // Aggregates registration errors via errors.Join so a misconfigured or duplicated connector fails
 // container initialization loudly instead of silently disabling the feature at runtime.
-func initConnectorRegistry() (*datasource.ConnectorRegistry, error) {
+func initConnectorRegistry(manager *pluginPkg.Manager) (*datasource.ConnectorRegistry, error) {
 	registry := datasource.NewConnectorRegistry()
 
 	var errs error
@@ -1680,7 +1693,43 @@ func initConnectorRegistry() (*datasource.ConnectorRegistry, error) {
 	if errs != nil {
 		return nil, errs
 	}
+	if err := pluginPkg.RegisterBuiltins(manager, registry); err != nil {
+		return nil, fmt.Errorf("register built-in plugin lifecycle entries: %w", err)
+	}
 	return registry, nil
+}
+
+func startBuiltinPlugins(manager *pluginPkg.Manager) error {
+	if err := pluginPkg.RegisterBuiltinParsers(manager); err != nil {
+		return err
+	}
+	return pluginPkg.StartAll(context.Background(), manager)
+}
+
+func loadExternalPlugins(manager *pluginPkg.Manager, registry *datasource.ConnectorRegistry, searchRegistry *infra_web_search.Registry) error {
+	return pluginPkg.LoadExternalFromEnvWithRegistries(context.Background(), manager, registry, searchRegistry)
+}
+
+// startPluginHealthSupervisor activates the manager-wide control-plane health
+// loop after built-in and external plugins have both been registered and
+// started. The same supervisor covers every extension type. Bounded automatic
+// restart handles transient plugin crashes without allowing an endlessly
+// flapping runtime to consume lifecycle resources forever.
+func startPluginHealthSupervisor(manager *pluginPkg.Manager, cleaner interfaces.ResourceCleaner) {
+	if manager == nil {
+		return
+	}
+	if err := manager.StartHealthSupervisor(context.Background(), pluginPkg.HealthSupervisorConfig{
+		RestartEnabled:  true,
+		MaxRestartCount: 3,
+	}); err != nil {
+		logger.Warnf(context.Background(), "[Container] plugin health supervisor start failed: %v", err)
+		return
+	}
+	cleaner.RegisterWithName("PluginHealthSupervisor", func() error {
+		manager.StopHealthSupervisor()
+		return nil
+	})
 }
 
 // startDataSourceScheduler starts the data source cron scheduler and registers cleanup.

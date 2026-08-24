@@ -3,6 +3,7 @@ package docparser
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -44,14 +45,57 @@ type ReaderDeps struct {
 // localEngines holds all locally registered parser engines, in registration
 // order — which is also the order the engine list is shown in.
 var localEngines []EngineRegistration
+var localEnginesMu sync.RWMutex
 
-// RegisterEngine adds an engine to the local registry. Called from init().
-func RegisterEngine(e EngineRegistration) {
+// RegisterEngine adds an engine to the local registry. Called from init() and
+// by the external plugin loader. Duplicate names are rejected so an external
+// plugin cannot silently shadow an existing engine.
+func RegisterEngine(e EngineRegistration) error {
+	if e == nil {
+		return fmt.Errorf("parser engine registration is nil")
+	}
+	localEnginesMu.Lock()
+	defer localEnginesMu.Unlock()
+	for _, existing := range localEngines {
+		if existing.Name() == e.Name() {
+			return fmt.Errorf("parser engine %q is already registered", e.Name())
+		}
+	}
 	localEngines = append(localEngines, e)
+	return nil
+}
+
+// UnregisterEngine removes the first locally registered engine with the given
+// name. Built-in engines are registered during package initialization and are
+// not removed by normal plugin lifecycle code; external plugin managers use
+// this when rolling back a failed discovery pass or unloading a plugin.
+func UnregisterEngine(name string) bool {
+	localEnginesMu.Lock()
+	defer localEnginesMu.Unlock()
+	for i := len(localEngines) - 1; i >= 0; i-- {
+		engine := localEngines[i]
+		if engine.Name() != name {
+			continue
+		}
+		localEngines = append(localEngines[:i], localEngines[i+1:]...)
+		return true
+	}
+	return false
+}
+
+// ListRegisteredEngines returns a snapshot of the local engine registrations.
+// It lets the common plugin control plane expose built-in parser engines
+// without giving the control plane ownership of the parser implementation.
+func ListRegisteredEngines() []EngineRegistration {
+	localEnginesMu.RLock()
+	defer localEnginesMu.RUnlock()
+	return append([]EngineRegistration(nil), localEngines...)
 }
 
 // lookupEngine returns the locally registered engine with this name.
 func lookupEngine(name string) (EngineRegistration, bool) {
+	localEnginesMu.RLock()
+	defer localEnginesMu.RUnlock()
 	for _, engine := range localEngines {
 		if engine.Name() == name {
 			return engine, true
@@ -105,10 +149,14 @@ func ListAllEngines(
 		remoteMap[re.Name] = re
 	}
 
-	seen := make(map[string]bool, len(localEngines))
-	result := make([]types.ParserEngineInfo, 0, len(localEngines)+len(remoteEngines))
+	localEnginesMu.RLock()
+	engines := append([]EngineRegistration(nil), localEngines...)
+	localEnginesMu.RUnlock()
 
-	for _, e := range localEngines {
+	seen := make(map[string]bool, len(engines))
+	result := make([]types.ParserEngineInfo, 0, len(engines)+len(remoteEngines))
+
+	for _, e := range engines {
 		name := e.Name()
 		seen[name] = true
 

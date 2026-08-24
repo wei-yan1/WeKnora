@@ -747,8 +747,9 @@ export default {
       skipped: '跳过',
       failed: '失败'
     },
-    logStatus: {
-      running: '同步中',
+		logStatus: {
+			pending: '排队中',
+			running: '同步中',
       success: '成功',
       partial: '部分成功',
       failed: '失败',
@@ -5789,6 +5790,12 @@ export default {
     unsupportedTypesHint: '部分文档类型（{types}）暂无可用解析引擎，上传后将无法解析',
     goToParserSettings: '前往配置',
     importURL: '导入网页',
+    importLocalDir: '导入本地目录',
+    importLocalDirTitle: '导入本地目录',
+    localDirLabel: '目录路径',
+    localDirPlaceholder: '例如：C:\\Users\\MR\\Music 或 /data/docs',
+    localDirTip: '输入服务器上的本地目录绝对路径，系统将持续同步该目录下的文件',
+    localDirRequired: '请输入目录路径',
     addDocument: '添加文档',
     importURLTitle: '导入网页',
     urlRequired: '请输入URL',
