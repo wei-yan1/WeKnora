@@ -1,6 +1,6 @@
 # WeKnora 插件框架（课题一）
 
-> 本文档聚焦 WeKnora 的**统一插件控制面 +**五大扩展点插件化**。它不是项目总览（README），而是"插件框架"这一课题的交付说明：架构、治理能力、内置/外部插件共存、五个扩展点的制作文档入口。
+> 本文档聚焦 WeKnora 的**统一插件控制面 + 五大扩展点插件化**。它不是项目总览（README），而是"插件框架"这一课题的交付说明：架构、治理能力、内置/外部插件共存、五个扩展点的制作文档入口。
 
 ---
 
@@ -93,7 +93,7 @@ D:\weknora-plugins\          ← 总目录（名称任意）
 
 ### 数据源同步的双层分布式锁（生产化）
 
-数据源同步是唯一"有状态、要保证一致性"的扩展点，因此没有简单用单把锁，而是拆成两层边界（`internal/datasource/sync_lock.go`）：
+数据源同步是典型的"一次触发、要防并发"的场景，因此没有简单用单把锁，而是拆成两层边界（`internal/datasource/sync_lock.go`）：
 
 | 锁 | 租约 / 续租 | 串行化边界 | 目的 |
 |---|---|---|---|
@@ -121,7 +121,7 @@ D:\weknora-plugins\          ← 总目录（名称任意）
 | 文档解析（Parser） | `parser` | [`docs/plugin-development-parser.md`](docs/plugin-development-parser.md) | `pluginapi.ParserHandler` |
 | 网络搜索（WebSearch） | `search` | [`docs/plugin-development-websearch.md`](docs/plugin-development-websearch.md) | `pluginapi.WebSearchHandler` |
 | 模型管理（Model） | `model` | [`docs/plugin-development-model.md`](docs/plugin-development-model.md) | `pluginapi.ModelHandler` |
-| 检索引擎（Retriever） | `retriever` | [`docs/plugin-development-retriever.md`](docs/plugin-development-retriever.md)（协议冻结中，未落地） | `pluginapi.RetrieverHandler` |
+| 检索引擎（Retriever） | `retriever` | [`docs/plugin-development-retriever.md`](docs/plugin-development-retriever.md) | `pluginapi.RetrieverProvider` / `pluginapi.RetrieverBackend` |
 
 入门先读 [`docs/plugin-development-datasource.md`](docs/plugin-development-datasource.md) 第 1 节（五类扩展点共用的 Manifest / Runtime / PluginControl / 目录环境变量与权限骨架），再阅读对应扩展点的制作文档。
 
@@ -144,6 +144,7 @@ plugins/
 ## 七、当前实现的边界（仍待后续课题处理）
 
 - 五类扩展点中，**数据源已有端到端验证**（飞书 / 语雀 / Notion / RSS / IMA / GitLab / LocalDir / GitHub / 钉钉）；其余四类的协议和适配层已就位，UI 接入完整度不同；
-- 模型管理的前端"plugin source"选项、检索引擎的 schema/credential 体系、解析的流式化、WebSearch 的统一 settings/credentials，仍是后续课题需要补齐的 P1 项；
+- 检索引擎已落地最小协议（`Describe`/`OpenStore`/`CloseStore`/`BatchPut`/`Search`/`Delete`/`Patch` + `store_handle` 会话），自愈式 `GRPCRetrieverRepository` 已接入内部 `RetrieveEngineRepository`，`copy_indices` 等高级能力暂为可选 capability；
+- 模型管理的前端"plugin source"选项、检索引擎的前端 schema/credential 配置界面、解析的流式化、WebSearch 的统一 settings/credentials，仍是后续课题需要补齐的 P1 项；
 - Docker 沙箱是硬隔离的唯一边界；ProcessRuntime 仅供开发；
 - 受控 Egress 代理（`allowlist` 的网络层强制）尚未实现，SDK 层 GuardedHTTPClient 是软约束。
