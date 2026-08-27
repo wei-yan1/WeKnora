@@ -3,7 +3,7 @@
 > 本文面向要独立开发一个 **模型管理（Model Provider）扩展点插件** 的开发者。
 > 它只依赖本仓库的 `pkg/pluginapi` SDK 和主仓的插件扫描机制，无需改动 WeKnora 主仓源码。
 >
-> 阅读前置：先读 [plugin-development-datasource.md](plugin-development-datasource.md) 了解统一的插件骨架。本文只讲 Model 特有的部分。
+> 五类扩展点共用的插件骨架见本文第 2 节。本文只讲 Model 特有的部分。
 
 ## 1. Model 插件是做什么的
 

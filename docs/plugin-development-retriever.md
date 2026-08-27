@@ -3,7 +3,7 @@
 > 本文面向要独立开发一个 **检索引擎（Retriever）扩展点插件** 的开发者。
 > 它只依赖本仓库的 `pkg/pluginapi` SDK 和主仓的插件扫描机制，无需改动 WeKnora 主仓源码。
 >
-> 阅读前置：先读 [plugin-development-datasource.md](plugin-development-datasource.md) 了解统一的插件骨架（`plugin.yaml` 字段、`PluginControl` 握手/健康、`WEKNORA_PLUGIN_ADDR`、目录环境变量、构建与装载）。本文只讲 Retriever 特有的部分，不重复通用骨架。
+> 五类扩展点共用的插件骨架（`plugin.yaml` 字段、`PluginControl` 握手/健康、`WEKNORA_PLUGIN_ADDR`、目录环境变量、构建与装载）见本文第 2 节。本文只讲 Retriever 特有的部分。
 
 ## 1. Retriever 插件是做什么的
 

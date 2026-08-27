@@ -1,8 +1,6 @@
 # WeKnora 外部数据源插件开发指南
 
-本文是数据源插件的完整开发指南，同时也是五类扩展点共用的插件骨架入口。
-其他扩展点只需要复用本文中的 Manifest、Runtime、PluginControl、目录装载和
-治理约定，再实现各自的业务协议。
+本文是数据源插件的完整开发指南。五类扩展点共用的插件骨架（Manifest、Runtime、PluginControl、目录装载与治理约定）见本文第 1 节；其余四类扩展点的制作指南见本文第 6 节。
 
 本目录中的 `plugins/weknora-plugin-localdir` 是一个可独立构建的完整示例；`plugins/template-datasource` 是最小脚手架。外部插件不需要修改 WeKnora 主仓的注册表或同步流程。
 

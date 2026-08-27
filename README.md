@@ -117,13 +117,13 @@ D:\weknora-plugins\          ← 总目录（名称任意）
 
 | 扩展点 | `extension_type` | 文档 | SDK Handler |
 |---|---|---|---|
-| 数据源（DataSource） | `datasource` | [`docs/plugin-development-datasource.md`](docs/plugin-development-datasource.md)（**同时是五类共用的骨架入口**） | `pluginapi.DataSourceHandler` |
+| 数据源（DataSource） | `datasource` | [`docs/plugin-development-datasource.md`](docs/plugin-development-datasource.md) | `pluginapi.DataSourceHandler` |
 | 文档解析（Parser） | `parser` | [`docs/plugin-development-parser.md`](docs/plugin-development-parser.md) | `pluginapi.ParserHandler` |
 | 网络搜索（WebSearch） | `search` | [`docs/plugin-development-websearch.md`](docs/plugin-development-websearch.md) | `pluginapi.WebSearchHandler` |
 | 模型管理（Model） | `model` | [`docs/plugin-development-model.md`](docs/plugin-development-model.md) | `pluginapi.ModelHandler` |
 | 检索引擎（Retriever） | `retriever` | [`docs/plugin-development-retriever.md`](docs/plugin-development-retriever.md) | `pluginapi.RetrieverProvider` / `pluginapi.RetrieverBackend` |
 
-入门先读 [`docs/plugin-development-datasource.md`](docs/plugin-development-datasource.md) 第 1 节（五类扩展点共用的 Manifest / Runtime / PluginControl / 目录环境变量与权限骨架），再阅读对应扩展点的制作文档。
+每个扩展点文档的第 2 节都自带了五类扩展点共用的骨架速览（`extension_type`、`PluginControl` 握手/健康、`WEKNORA_PLUGIN_ADDR`、目录环境变量与权限），可直接从任一扩展点文档入门。
 
 ---
 
