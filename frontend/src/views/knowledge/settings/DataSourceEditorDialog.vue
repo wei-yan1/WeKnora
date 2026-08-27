@@ -1509,7 +1509,7 @@ const drawerConfirmText = computed(() => {
           @click="selectType(def)"
         >
           <div class="ds-type-header">
-            <DataSourceTypeIcon :type="def.type" :size="20" />
+            <DataSourceTypeIcon :type="def.type" :size="20" :icon="def.icon" />
             <span class="ds-type-name">{{ connectorName(def) }}</span>
             <span v-if="!def.available" class="ds-type-soon">{{ t('datasource.comingSoon') }}</span>
           </div>

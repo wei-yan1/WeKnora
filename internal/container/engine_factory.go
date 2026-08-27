@@ -3,6 +3,7 @@ package container
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strconv"
@@ -29,12 +30,15 @@ import (
 	qdrantRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/qdrant"
 	sqliteRetrieverRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/sqlite"
 	tencentVectorDBRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/tencentvectordb"
+	grpcRetrieverRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/grpc"
 	weaviateRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/weaviate"
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/config"
+	pluginPkg "github.com/Tencent/WeKnora/internal/plugin"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/Tencent/WeKnora/internal/utils"
+	"github.com/Tencent/WeKnora/pkg/pluginapi"
 	"github.com/tencent/vectordatabase-sdk-go/tcvectordb"
 )
 
@@ -43,10 +47,10 @@ import (
 // injected into VectorStoreService for dynamic registry updates. The
 // EngineFactory type itself is unchanged — the audit sink is captured in the
 // closure rather than added to the signature.
-func NewEngineFactory(db *gorm.DB, cfg *config.Config, auditSvc interfaces.AuditLogService) interfaces.EngineFactory {
+func NewEngineFactory(db *gorm.DB, cfg *config.Config, auditSvc interfaces.AuditLogService, retrieverRegistry *pluginPkg.RetrieverProviderRegistry) interfaces.EngineFactory {
 	sink := newAuditSinkAdapter(auditSvc)
 	return func(ctx context.Context, store types.VectorStore) (interfaces.RetrieveEngineService, error) {
-		return createEngineServiceFromStore(ctx, store, db, cfg, sink)
+		return createEngineServiceFromStore(ctx, store, db, cfg, sink, retrieverRegistry)
 	}
 }
 
@@ -59,10 +63,8 @@ func createEngineServiceFromStore(
 	db *gorm.DB,
 	cfg *config.Config,
 	auditSink openSearchRepo.AuditSink,
+	retrieverRegistry *pluginPkg.RetrieverProviderRegistry,
 ) (interfaces.RetrieveEngineService, error) {
-	if err := validateRuntimeVectorStoreAddresses(store); err != nil {
-		return nil, err
-	}
 	switch store.EngineType {
 	case types.PostgresRetrieverEngineType:
 		return createPostgresEngine(store, db)
@@ -83,8 +85,71 @@ func createEngineServiceFromStore(
 	case types.OpenSearchRetrieverEngineType:
 		return createOpenSearchEngine(ctx, store, auditSink)
 	default:
-		return nil, fmt.Errorf("unsupported engine type: %s", store.EngineType)
+		// External retriever plugins: look up the provider by engine type and
+		// build a GRPC-backed repository wrapped in the standard hybrid engine.
+		if retrieverRegistry == nil {
+			return nil, fmt.Errorf("unsupported engine type: %s", store.EngineType)
+		}
+		provider, ok := retrieverRegistry.Get(store.EngineType)
+		if !ok {
+			return nil, fmt.Errorf("unsupported engine type: %s", store.EngineType)
+		}
+		return createExternalRetrieverEngine(store, provider)
 	}
+}
+
+// createExternalRetrieverEngine builds a hybrid retrieve engine backed by an
+// external retriever plugin. Embedding is computed by the host (KVHybrid), so
+// the repository only forwards already-computed vectors over the plugin
+// protocol.
+func createExternalRetrieverEngine(store types.VectorStore, provider pluginPkg.RetrieverProviderInfo) (interfaces.RetrieveEngineService, error) {
+	repo := grpcRetrieverRepo.NewGRPCRetrieverRepository(provider, vectorStoreToRetrieverConfig(store), supportFromCapabilities(provider.Capabilities))
+	return retriever.NewKVHybridRetrieveEngine(repo, store.EngineType), nil
+}
+
+// vectorStoreToRetrieverConfig maps a VectorStore's connection and index config
+// onto the plugin's RetrieverStoreConfig (settings/credentials/index_config).
+func vectorStoreToRetrieverConfig(store types.VectorStore) pluginapi.RetrieverStoreConfig {
+	cc := store.ConnectionConfig
+	cfg := pluginapi.RetrieverStoreConfig{
+		Settings: map[string]any{
+			"addr":                   cc.Addr,
+			"host":                   cc.Host,
+			"port":                   cc.Port,
+			"use_tls":                cc.UseTLS,
+			"database":               cc.Database,
+			"grpc_address":           cc.GrpcAddress,
+			"scheme":                 cc.Scheme,
+			"http_port":              cc.HTTPPort,
+			"use_default_connection": cc.UseDefaultConnection,
+			"insecure_skip_verify":   cc.InsecureSkipVerify,
+		},
+		Credentials: map[string]any{
+			"username": cc.Username,
+			"password": cc.Password,
+			"api_key":  cc.APIKey,
+		},
+		IndexConfig: map[string]any{},
+	}
+	if b, err := json.Marshal(store.IndexConfig); err == nil {
+		_ = json.Unmarshal(b, &cfg.IndexConfig)
+	}
+	return cfg
+}
+
+// supportFromCapabilities derives the retrieve types an external plugin
+// supports from its declared capabilities.
+func supportFromCapabilities(capabilities []string) []types.RetrieverType {
+	var support []types.RetrieverType
+	for _, c := range capabilities {
+		switch c {
+		case "vector":
+			support = append(support, types.VectorRetrieverType)
+		case "keywords":
+			support = append(support, types.KeywordsRetrieverType)
+		}
+	}
+	return support
 }
 
 // validateRuntimeVectorStoreAddresses is the final guard for persisted or

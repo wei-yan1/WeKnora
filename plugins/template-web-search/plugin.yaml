@@ -4,7 +4,7 @@ name: Template Web Search Provider
 version: 0.1.0
 extension_type: search
 protocol_version: v1
-weknora_version: ">=1.0 <2.0"
+weknora_version: ">=0.7 <1.0"
 entrypoint: ./template-web-search
 permissions:
   network: none

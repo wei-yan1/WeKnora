@@ -64,6 +64,24 @@ func (s *modelService) decryptAppSecret(encrypted string) string {
 	return encrypted
 }
 
+// validatePluginModelConfig forwards a plugin-backed model's configuration to
+// the plugin's ValidateConfig RPC so configuration errors surface at save time
+// rather than on first invocation.
+func (s *modelService) validatePluginModelConfig(ctx context.Context, model *types.Model) error {
+	if model.Parameters.Provider == "" {
+		return apperrors.NewValidationError("provider is required for plugin models")
+	}
+	config := map[string]any{
+		"model_name": model.Name,
+		"base_url":   model.Parameters.BaseURL,
+		"api_key":    model.Parameters.APIKey,
+	}
+	for k, v := range model.Parameters.ExtraConfig {
+		config[k] = v
+	}
+	return provider.ValidateExternalModelConfig(ctx, model.Parameters.Provider, config)
+}
+
 // resolveWeKnoraCloudCredentials 为 WeKnoraCloud 厂商模型补全 AppID/AppSecret。
 // 当模型自身参数中未存储凭证时，自动从空间配置中获取（SaveCredentials 保存的凭证）。
 func (s *modelService) resolveWeKnoraCloudCredentials(ctx context.Context, params *types.ModelParameters) (appID, appSecret string) {
@@ -116,6 +134,17 @@ func (s *modelService) CreateModel(ctx context.Context, model *types.Model) erro
 
 		logger.Infof(ctx, "Remote model created successfully: %s", model.ID)
 		return nil
+	}
+
+	// Handle plugin models (external model plugins over process-out-of-band gRPC).
+	// Validate the config against the plugin before persisting, and skip the
+	// local-download path that would otherwise apply to any non-remote source.
+	if model.Source == types.ModelSourcePlugin {
+		if err := s.validatePluginModelConfig(ctx, model); err != nil {
+			return err
+		}
+		model.Status = types.ModelStatusActive
+		return s.repo.Create(ctx, model)
 	}
 
 	// Handle local models (e.g., Ollama)
@@ -248,6 +277,13 @@ func (s *modelService) UpdateModel(ctx context.Context, model *types.Model) erro
 		model.TenantID = existingModel.TenantID
 		model.IsBuiltin = true
 		model.ManagedBy = ""
+	}
+
+	// Validate plugin-backed models against the plugin before persisting.
+	if model.Source == types.ModelSourcePlugin {
+		if err := s.validatePluginModelConfig(ctx, model); err != nil {
+			return err
+		}
 	}
 
 	// Update model in repository

@@ -278,6 +278,9 @@ func RegisterDataSourceRoutes(
 		// Get available connector types — Viewer+
 		ds.GET("/types", g.Viewer(), handler.GetAvailableConnectors)
 
+		// Stream a plugin-bundled connector icon — Viewer+
+		ds.GET("/icon/:type", g.Viewer(), handler.GetConnectorIcon)
+
 		// Validate credentials without persistence (for "Test Connection" button) — Admin+
 		ds.POST("/validate-credentials", g.Admin(), handler.ValidateCredentials)
 

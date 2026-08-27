@@ -253,7 +253,8 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	// plugin.Manager is needed by registerWebSearchProviders (RegisterBuiltinWebSearch),
 	// so it must be provided before the Invoke below. It is the single shared
 	// plugin control-plane instance; later wiring blocks reuse the same one.
-	must(container.Provide(func() *pluginPkg.Manager { return pluginPkg.NewManager("") }))
+	must(container.Provide(func() *pluginPkg.Manager { return pluginPkg.NewManager(pluginPkg.HostVersion) }))
+	must(container.Provide(func() *pluginPkg.RetrieverProviderRegistry { return pluginPkg.NewRetrieverProviderRegistry() }))
 	must(container.Invoke(registerWebSearchProviders))
 	must(container.Provide(repository.NewWebSearchProviderRepository))
 	must(container.Provide(repository.NewVectorStoreRepository))
@@ -1102,6 +1103,7 @@ func initRawFileService(_ *config.Config) (interfaces.FileService, error) {
 func initRetrieveEngineRegistry(
 	db *gorm.DB, cfg *config.Config, auditSvc interfaces.AuditLogService,
 	storeRepo interfaces.VectorStoreRepository, engineFactory interfaces.EngineFactory,
+	retrieverRegistry *pluginPkg.RetrieverProviderRegistry,
 ) (interfaces.RetrieveEngineRegistry, error) {
 	// storeRepo and engineFactory let the registry rebuild a store engine that
 	// is absent from this process, which happens when startup skipped it after
@@ -1408,7 +1410,7 @@ func initRetrieveEngineRegistry(
 	}
 	// ─── DB store registration (byStoreID) ───
 	if storeReg, ok := registry.(*retriever.RetrieveEngineRegistry); ok {
-		loadDBStoresIntoRegistry(storeReg, db, cfg, auditSink)
+		loadDBStoresIntoRegistry(storeReg, db, cfg, auditSink, retrieverRegistry)
 	}
 
 	return registry, nil
@@ -1418,6 +1420,7 @@ func initRetrieveEngineRegistry(
 // in the registry's byStoreID map. Failures are logged and skipped (non-fatal).
 func loadDBStoresIntoRegistry(
 	storeRegistry interfaces.StoreRegistry, db *gorm.DB, cfg *config.Config, auditSink openSearchRepo.AuditSink,
+	retrieverRegistry *pluginPkg.RetrieverProviderRegistry,
 ) {
 	ctx := context.Background()
 	log := logger.GetLogger(ctx)
@@ -1435,7 +1438,7 @@ func loadDBStoresIntoRegistry(
 
 	log.Infof("Loading %d vector store(s) from database", len(stores))
 	for _, store := range stores {
-		svc, err := createEngineServiceFromStore(ctx, store, db, cfg, auditSink)
+		svc, err := createEngineServiceFromStore(ctx, store, db, cfg, auditSink, retrieverRegistry)
 		if err != nil {
 			log.Errorf("Failed to create engine for store %s (%s): %v", store.ID, store.Name, err)
 			continue
@@ -1706,8 +1709,8 @@ func startBuiltinPlugins(manager *pluginPkg.Manager) error {
 	return pluginPkg.StartAll(context.Background(), manager)
 }
 
-func loadExternalPlugins(manager *pluginPkg.Manager, registry *datasource.ConnectorRegistry, searchRegistry *infra_web_search.Registry) error {
-	return pluginPkg.LoadExternalFromEnvWithRegistries(context.Background(), manager, registry, searchRegistry)
+func loadExternalPlugins(manager *pluginPkg.Manager, registry *datasource.ConnectorRegistry, searchRegistry *infra_web_search.Registry, retrieverRegistry *pluginPkg.RetrieverProviderRegistry) error {
+	return pluginPkg.LoadExternalFromEnvWithRegistries(context.Background(), manager, registry, searchRegistry, retrieverRegistry)
 }
 
 // startPluginHealthSupervisor activates the manager-wide control-plane health

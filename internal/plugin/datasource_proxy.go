@@ -384,11 +384,15 @@ func fromWireItems(items []pluginapi.FetchedItem) ([]types.FetchedItem, error) {
 			}
 			updatedAt = parsed
 		}
-		// The v1 datasource wire item does not yet carry a dedicated file_name
-		// field. Title is therefore the portable filename contract for fetched
-		// byte content; file-based plugins must preserve the extension there so
-		// WeKnora's existing ingest pipeline can select the correct parser.
-		result = append(result, types.FetchedItem{ExternalID: item.ExternalID, Title: item.Title, Content: item.Content, FileName: item.Title, URL: item.URL, ContentType: item.MIMEType, Metadata: item.Metadata, IsDeleted: item.IsDeleted, ReplacesSubtree: item.ReplacesSubtree, SubtreeKeep: item.SubtreeKeep, UpdatedAt: updatedAt})
+		// FileName is the portable filename (with extension) used by the ingest
+		// pipeline to select the correct parser. The wire item now carries a
+		// dedicated file_name field; fall back to Title for plugins built
+		// against an older SDK that does not populate it.
+		fileName := item.FileName
+		if fileName == "" {
+			fileName = item.Title
+		}
+		result = append(result, types.FetchedItem{ExternalID: item.ExternalID, Title: item.Title, Content: item.Content, FileName: fileName, URL: item.URL, ContentType: item.MIMEType, Metadata: item.Metadata, IsDeleted: item.IsDeleted, ReplacesSubtree: item.ReplacesSubtree, SubtreeKeep: item.SubtreeKeep, UpdatedAt: updatedAt})
 	}
 	return result, nil
 }

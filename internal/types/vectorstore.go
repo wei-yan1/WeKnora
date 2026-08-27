@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/errors"
@@ -94,9 +96,40 @@ var validEngineTypes = map[RetrieverEngineType]bool{
 	OpenSearchRetrieverEngineType:      true,
 }
 
+// externalVectorStoreTypes holds engine types registered by external retriever
+// plugins at load time. These engine types are not built into the host but are
+// still valid for VectorStore creation and are exposed via GetVectorStoreTypes.
+var (
+	externalVectorStoreTypesMu sync.RWMutex
+	externalVectorStoreTypes   = make(map[RetrieverEngineType]VectorStoreTypeInfo)
+)
+
+// RegisterExternalVectorStoreType marks an engine type (declared by an external
+// retriever plugin via metadata.engine_type) as valid for VectorStore creation
+// and lists it in GetVectorStoreTypes.
+func RegisterExternalVectorStoreType(info VectorStoreTypeInfo) {
+	externalVectorStoreTypesMu.Lock()
+	defer externalVectorStoreTypesMu.Unlock()
+	externalVectorStoreTypes[RetrieverEngineType(info.Type)] = info
+}
+
+// UnregisterExternalVectorStoreType removes a previously registered external
+// engine type.
+func UnregisterExternalVectorStoreType(t RetrieverEngineType) {
+	externalVectorStoreTypesMu.Lock()
+	defer externalVectorStoreTypesMu.Unlock()
+	delete(externalVectorStoreTypes, t)
+}
+
 // IsValidEngineType checks whether the given engine type is valid for VectorStore.
 func IsValidEngineType(t RetrieverEngineType) bool {
-	return validEngineTypes[t]
+	if validEngineTypes[t] {
+		return true
+	}
+	externalVectorStoreTypesMu.RLock()
+	defer externalVectorStoreTypesMu.RUnlock()
+	_, ok := externalVectorStoreTypes[t]
+	return ok
 }
 
 // Validate checks required fields and engine type validity.
@@ -104,7 +137,7 @@ func (v *VectorStore) Validate() error {
 	if v.Name == "" {
 		return errors.NewValidationError("name is required")
 	}
-	if !validEngineTypes[v.EngineType] {
+	if !IsValidEngineType(v.EngineType) {
 		return errors.NewValidationError(fmt.Sprintf("unsupported engine type: %s", v.EngineType))
 	}
 	if v.TenantID == 0 {
@@ -666,7 +699,7 @@ type VectorStoreFieldInfo struct {
 func GetVectorStoreTypes() []VectorStoreTypeInfo {
 	tencentVectorDBReplicaNumber := resolveTencentVectorDBReplicaNumber(os.Getenv)
 
-	return []VectorStoreTypeInfo{
+	builtin := []VectorStoreTypeInfo{
 		{
 			Type:        "elasticsearch",
 			DisplayName: "Elasticsearch",
@@ -781,6 +814,27 @@ func GetVectorStoreTypes() []VectorStoreTypeInfo {
 			},
 		},
 	}
+	return appendExternalVectorStoreTypes(builtin)
+}
+
+// appendExternalVectorStoreTypes appends externally registered engine types
+// (from retriever plugins) to the built-in list, sorted by type name for a
+// stable API response.
+func appendExternalVectorStoreTypes(builtin []VectorStoreTypeInfo) []VectorStoreTypeInfo {
+	externalVectorStoreTypesMu.RLock()
+	defer externalVectorStoreTypesMu.RUnlock()
+	if len(externalVectorStoreTypes) == 0 {
+		return builtin
+	}
+	keys := make([]string, 0, len(externalVectorStoreTypes))
+	for k := range externalVectorStoreTypes {
+		keys = append(keys, string(k))
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		builtin = append(builtin, externalVectorStoreTypes[RetrieverEngineType(k)])
+	}
+	return builtin
 }
 
 // floatPtr returns a pointer to v, for setting VectorStoreFieldInfo Min/Max.

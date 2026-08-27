@@ -16,6 +16,8 @@ const (
 	ExtensionTypeDataSource = "datasource"
 	ExtensionTypeParser     = "parser"
 	ExtensionTypeSearch     = "search"
+	ExtensionTypeModel      = "model"
+	ExtensionTypeRetriever  = "retriever"
 )
 
 type Resource struct {
@@ -28,6 +30,7 @@ type Resource struct {
 type FetchedItem struct {
 	ExternalID      string            `json:"external_id"`
 	Title           string            `json:"title,omitempty"`
+	FileName        string            `json:"file_name,omitempty"`
 	Content         []byte            `json:"content,omitempty"`
 	URL             string            `json:"url,omitempty"`
 	MIMEType        string            `json:"mime_type,omitempty"`
@@ -105,13 +108,13 @@ func fromProtoResource(v *pluginproto.Resource) Resource {
 	return Resource{ExternalID: v.ExternalId, Name: v.Name, ParentID: v.ParentId, Type: v.Type, Metadata: v.Metadata}
 }
 func toProtoItem(v FetchedItem) *pluginproto.FetchedItem {
-	return &pluginproto.FetchedItem{ExternalId: v.ExternalID, Title: v.Title, Content: v.Content, Url: v.URL, MimeType: v.MIMEType, UpdatedAt: v.UpdatedAt, Metadata: v.Metadata, IsDeleted: v.IsDeleted, ReplacesSubtree: v.ReplacesSubtree, SubtreeKeep: v.SubtreeKeep}
+	return &pluginproto.FetchedItem{ExternalId: v.ExternalID, Title: v.Title, FileName: v.FileName, Content: v.Content, Url: v.URL, MimeType: v.MIMEType, UpdatedAt: v.UpdatedAt, Metadata: v.Metadata, IsDeleted: v.IsDeleted, ReplacesSubtree: v.ReplacesSubtree, SubtreeKeep: v.SubtreeKeep}
 }
 func fromProtoItem(v *pluginproto.FetchedItem) FetchedItem {
 	if v == nil {
 		return FetchedItem{}
 	}
-	return FetchedItem{ExternalID: v.ExternalId, Title: v.Title, Content: v.Content, URL: v.Url, MIMEType: v.MimeType, UpdatedAt: v.UpdatedAt, Metadata: v.Metadata, IsDeleted: v.IsDeleted, ReplacesSubtree: v.ReplacesSubtree, SubtreeKeep: v.SubtreeKeep}
+	return FetchedItem{ExternalID: v.ExternalId, Title: v.Title, FileName: v.FileName, Content: v.Content, URL: v.Url, MIMEType: v.MimeType, UpdatedAt: v.UpdatedAt, Metadata: v.Metadata, IsDeleted: v.IsDeleted, ReplacesSubtree: v.ReplacesSubtree, SubtreeKeep: v.SubtreeKeep}
 }
 func EncodeRequest(v Request) (*pluginproto.DataSourceRequest, error) {
 	cfg, err := structConfig(v.Config)

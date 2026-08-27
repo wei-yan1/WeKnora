@@ -54,15 +54,43 @@ func (r *ProcessRuntime) Start(ctx context.Context) error {
 	if r.Command == "" {
 		return fmt.Errorf("plugin %q has no process command", r.Manifest.ID)
 	}
-	address := r.Address
-	if address == "" {
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			return err
+
+	// Keep the transport as loopback TCP to stay cross-platform with the
+	// desktop edition (cmd/desktop). Probing a free port and closing it before
+	// the child binds has a small TOCTOU window, so retry a few times to cover
+	// the rare case where another process steals the port in between.
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		address := r.Address
+		if address == "" {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				return err
+			}
+			address = listener.Addr().String()
+			_ = listener.Close()
 		}
-		address = listener.Addr().String()
-		_ = listener.Close()
+		if err := r.startOnce(ctx, address); err != nil {
+			lastErr = err
+			if attempt < maxAttempts-1 {
+				// Exponential backoff between attempts so a transient port
+				// race does not exhaust all attempts within a few milliseconds.
+				delay := 100 * time.Millisecond * time.Duration(1<<uint(attempt))
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			continue
+		}
+		return nil
 	}
+	return lastErr
+}
+
+func (r *ProcessRuntime) startOnce(ctx context.Context, address string) error {
 	commandArgs := append([]string(nil), r.Args...)
 	cmd := exec.Command(r.Command, commandArgs...)
 	cmd.Env = append(os.Environ(),

@@ -137,6 +137,8 @@ const (
 	defaultHealthInterval    = 30 * time.Second
 	defaultFailureThreshold  = 3
 	defaultCancellationGrace = 5 * time.Second
+	defaultStopGrace         = 15 * time.Second
+	defaultStartGrace        = 30 * time.Second
 )
 
 func NewManager(hostVersion string) *Manager {
@@ -339,7 +341,7 @@ func (m *Manager) restartOne(ctx context.Context, id string, runtime Runtime, ex
 	entry.state = HealthStatus{State: StateDraining, CheckedAt: time.Now().UTC(), Generation: entry.generation}
 	m.mu.Unlock()
 	drainAdmission(ctx, admission, drainTimeout)
-	stopCtx, cancelStop := context.WithTimeout(ctx, 15*time.Second)
+	stopCtx, cancelStop := context.WithTimeout(ctx, defaultStopGrace)
 	stopErr := runtime.Stop(stopCtx)
 	cancelStop()
 	if stopErr != nil {
@@ -360,7 +362,7 @@ func (m *Manager) restartOne(ctx context.Context, id string, runtime Runtime, ex
 		m.mu.Unlock()
 		return
 	}
-	startCtx, cancelStart := context.WithTimeout(ctx, 30*time.Second)
+	startCtx, cancelStart := context.WithTimeout(ctx, defaultStartGrace)
 	startErr := runtime.Start(startCtx)
 	cancelStart()
 	if startErr != nil {
@@ -486,11 +488,14 @@ func (m *Manager) Stop(ctx context.Context, id string) error {
 	entry.state = HealthStatus{State: StateDraining, CheckedAt: time.Now().UTC(), Generation: entry.generation}
 	m.mu.Unlock()
 	drainAdmission(ctx, admission, admission.config.DrainTimeout)
-	if err := runtime.Stop(ctx); err != nil {
+	stopCtx, cancelStop := context.WithTimeout(ctx, defaultStopGrace)
+	stopErr := runtime.Stop(stopCtx)
+	cancelStop()
+	if stopErr != nil {
 		m.mu.Lock()
-		entry.state = HealthStatus{State: StateFailed, Message: err.Error(), CheckedAt: time.Now().UTC(), Generation: entry.generation}
+		entry.state = HealthStatus{State: StateFailed, Message: stopErr.Error(), CheckedAt: time.Now().UTC(), Generation: entry.generation}
 		m.mu.Unlock()
-		return fmt.Errorf("stop plugin %q: %w", id, err)
+		return fmt.Errorf("stop plugin %q: %w", id, stopErr)
 	}
 	postStopCtx, cancelPostStop := context.WithTimeout(context.WithoutCancel(ctx), defaultCancellationGrace)
 	postStopErr := admission.waitDrained(postStopCtx)

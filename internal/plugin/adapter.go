@@ -19,9 +19,11 @@ type ExtensionAdapter interface {
 // registration. Each adapter uses only the fields it cares about; the rest stay
 // empty.
 type adapterHandle struct {
-	connectorType string
-	parserName    string
-	searchType    string
+	connectorType   string
+	parserName      string
+	searchType      string
+	modelProvider   string
+	retrieverEngine string
 }
 
 // ExtensionAdapterRegistry maps an extension type to its business adapter. The
@@ -31,12 +33,16 @@ type ExtensionAdapterRegistry struct {
 	adapters map[string]ExtensionAdapter
 }
 
-func NewExtensionAdapterRegistry(connectorRegistry *datasource.ConnectorRegistry, searchRegistry *infraWebSearch.Registry) *ExtensionAdapterRegistry {
+func NewExtensionAdapterRegistry(connectorRegistry *datasource.ConnectorRegistry, searchRegistry *infraWebSearch.Registry, retrieverRegistry *RetrieverProviderRegistry) *ExtensionAdapterRegistry {
 	r := &ExtensionAdapterRegistry{adapters: make(map[string]ExtensionAdapter)}
 	r.Register(datasourceAdapter{registry: connectorRegistry})
 	r.Register(parserAdapter{})
 	if searchRegistry != nil {
 		r.Register(searchAdapter{registry: searchRegistry})
+	}
+	r.Register(modelAdapter{})
+	if retrieverRegistry != nil {
+		r.Register(retrieverAdapter{registry: retrieverRegistry})
 	}
 	return r
 }
@@ -58,7 +64,7 @@ type datasourceAdapter struct {
 func (datasourceAdapter) ExtensionType() string { return ExtensionDataSource }
 
 func (a datasourceAdapter) Register(manager *Manager, manifest Manifest, runtime Runtime) (adapterHandle, error) {
-	connectorType, err := RegisterExternalDataSource(manager, a.registry, manifest, runtime, false)
+	connectorType, err := registerExternalDataSource(manager, a.registry, manifest, runtime, false, manifest.SourceDir)
 	return adapterHandle{connectorType: connectorType}, err
 }
 
@@ -85,6 +91,20 @@ func (parserAdapter) Register(manager *Manager, manifest Manifest, runtime Runti
 
 func (parserAdapter) Unregister(h adapterHandle) {
 	UnregisterExternalParser(ParserDescriptor{EngineName: h.parserName})
+}
+
+// modelAdapter wires a model plugin into the host model provider registry.
+type modelAdapter struct{}
+
+func (modelAdapter) ExtensionType() string { return ExtensionModel }
+
+func (modelAdapter) Register(manager *Manager, manifest Manifest, runtime Runtime) (adapterHandle, error) {
+	providerName, err := RegisterExternalModel(manager, manifest, runtime, false)
+	return adapterHandle{modelProvider: providerName}, err
+}
+
+func (modelAdapter) Unregister(h adapterHandle) {
+	UnregisterExternalModel(h.modelProvider)
 }
 
 // searchAdapter wires a web-search plugin into the tenant-scoped search registry.

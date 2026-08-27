@@ -4,7 +4,8 @@ name: Example Data Source
 version: 0.1.0
 extension_type: datasource
 protocol_version: v1
-weknora_version: ">=1.0 <2.0"
+weknora_version: ">=0.7 <1.0"
+entrypoint: ./weknora-plugin-example
 permissions:
   network: none
   data:

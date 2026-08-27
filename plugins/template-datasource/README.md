@@ -63,11 +63,13 @@ my-plugin/
 └── weknora-plugin-example.exe
 ```
 
-然后设置宿主的插件目录：
+然后设置宿主的插件目录（按扩展类型分别指向目录，数据源插件放入 `WEKNORA_PLUGIN_DIR_DATASOURCE` 指向的目录）：
 
 ```powershell
-$env:WEKNORA_PLUGIN_DIRS = "D:\path\to\my-plugin"
+$env:WEKNORA_PLUGIN_DIR_DATASOURCE = "D:\weknora-plugins\datasource"
 ```
+
+路径仅为示例，可换成任意存在的绝对路径（Windows / Linux / macOS 均可）。例如 Linux 下 `export WEKNORA_PLUGIN_DIR_DATASOURCE=/opt/weknora-plugins/datasource`。多目录分隔符会自动适配：Windows 用 `;`，Linux/macOS 用 `:`。目录必须真实存在，否则会报 `stat plugin root ... not a directory`。其余四类扩展点分别用 `WEKNORA_PLUGIN_DIR_PARSER` / `WEKNORA_PLUGIN_DIR_SEARCH` / `WEKNORA_PLUGIN_DIR_MODEL` / `WEKNORA_PLUGIN_DIR_RETRIEVER` 指定。
 
 宿主会发现 Manifest、检查版本和权限、启动进程、完成握手和健康检查，
 然后把数据源元数据加入统一的数据源类型列表。新增插件不需要重新修改

@@ -71,6 +71,7 @@ func DiscoverPackages(roots []string) ([]Package, error) {
 			return nil, fmt.Errorf("duplicate plugin id %q in %s and %s", manifest.ID, previous, path)
 		}
 		seen[manifest.ID] = path
+		manifest.SourceDir = filepath.Dir(path)
 		packages = append(packages, Package{Root: filepath.Dir(path), ManifestPath: path, Manifest: manifest})
 	}
 	return packages, nil

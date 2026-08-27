@@ -53,6 +53,7 @@ const (
 	ModelSourceNvidia      ModelSource = "nvidia"       // NVIDIA model
 	ModelSourceNovita      ModelSource = "novita"       // Novita AI model
 	ModelSourceAzureOpenAI ModelSource = "azure_openai" // Azure OpenAI model
+	ModelSourcePlugin     ModelSource = "plugin"       // External model plugin (process-out-of-band gRPC)
 )
 
 // EmbeddingParameters represents the embedding parameters for a model

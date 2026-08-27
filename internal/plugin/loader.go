@@ -16,7 +16,7 @@ import (
 // and starts it. The datasource path also registers an instance-aware factory
 // in the existing connector registry.
 func LoadExternal(ctx context.Context, roots []string, manager *Manager, registry *datasource.ConnectorRegistry) error {
-	return LoadExternalWithRegistries(ctx, roots, manager, registry, nil)
+	return LoadExternalWithRegistries(ctx, roots, manager, registry, nil, nil)
 }
 
 // LoadExternalWithRegistries is the full v1 loader. Datasource and parser
@@ -26,12 +26,12 @@ func LoadExternal(ctx context.Context, roots []string, manager *Manager, registr
 // Extension-specific registration is delegated to an ExtensionAdapterRegistry,
 // so adding a new extension type requires registering a new adapter rather than
 // adding a switch case here.
-func LoadExternalWithRegistries(ctx context.Context, roots []string, manager *Manager, registry *datasource.ConnectorRegistry, searchRegistry *infraWebSearch.Registry) error {
+func LoadExternalWithRegistries(ctx context.Context, roots []string, manager *Manager, registry *datasource.ConnectorRegistry, searchRegistry *infraWebSearch.Registry, retrieverRegistry *RetrieverProviderRegistry) error {
 	packages, err := DiscoverPackages(roots)
 	if err != nil {
 		return err
 	}
-	adapters := NewExtensionAdapterRegistry(registry, searchRegistry)
+	adapters := NewExtensionAdapterRegistry(registry, searchRegistry, retrieverRegistry)
 	loaded := make([]loadedAdapter, 0, len(packages))
 	cleanup := func() {
 		for i := len(loaded) - 1; i >= 0; i-- {
@@ -82,16 +82,41 @@ type loadedAdapter struct {
 }
 
 func LoadExternalFromEnv(ctx context.Context, manager *Manager, registry *datasource.ConnectorRegistry) error {
-	return LoadExternalFromEnvWithRegistries(ctx, manager, registry, nil)
+	return LoadExternalFromEnvWithRegistries(ctx, manager, registry, nil, nil)
 }
 
-func LoadExternalFromEnvWithRegistries(ctx context.Context, manager *Manager, registry *datasource.ConnectorRegistry, searchRegistry *infraWebSearch.Registry) error {
-	value := strings.TrimSpace(os.Getenv("WEKNORA_PLUGIN_DIRS"))
-	if value == "" {
+// pluginDirEnvVars maps each extension type to the environment variable that
+// names the directory holding plugins of that type. Directories are organized
+// by extension type so a host can point each entry point at its own plugin
+// directory; every directory is still scanned and loaded at startup.
+var pluginDirEnvVars = []struct {
+	extensionType string
+	envVar        string
+}{
+	{ExtensionDataSource, "WEKNORA_PLUGIN_DIR_DATASOURCE"},
+	{ExtensionParser, "WEKNORA_PLUGIN_DIR_PARSER"},
+	{ExtensionSearch, "WEKNORA_PLUGIN_DIR_SEARCH"},
+	{ExtensionModel, "WEKNORA_PLUGIN_DIR_MODEL"},
+	{ExtensionRetriever, "WEKNORA_PLUGIN_DIR_RETRIEVER"},
+}
+
+func LoadExternalFromEnvWithRegistries(ctx context.Context, manager *Manager, registry *datasource.ConnectorRegistry, searchRegistry *infraWebSearch.Registry, retrieverRegistry *RetrieverProviderRegistry) error {
+	var roots []string
+	for _, entry := range pluginDirEnvVars {
+		value := strings.TrimSpace(os.Getenv(entry.envVar))
+		if value == "" {
+			continue
+		}
+		for _, dir := range strings.FieldsFunc(value, func(r rune) bool {
+			return r == os.PathListSeparator || r == ','
+		}) {
+			if dir = strings.TrimSpace(dir); dir != "" {
+				roots = append(roots, dir)
+			}
+		}
+	}
+	if len(roots) == 0 {
 		return nil
 	}
-	roots := strings.FieldsFunc(value, func(r rune) bool {
-		return r == os.PathListSeparator || r == ','
-	})
-	return LoadExternalWithRegistries(ctx, roots, manager, registry, searchRegistry)
+	return LoadExternalWithRegistries(ctx, roots, manager, registry, searchRegistry, retrieverRegistry)
 }

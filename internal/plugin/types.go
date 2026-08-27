@@ -79,6 +79,11 @@ type Manifest struct {
 	Permissions  Permissions    `json:"permissions" yaml:"permissions"`
 	Capabilities []string       `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
 	Metadata     map[string]any `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+
+	// SourceDir is the directory containing the plugin manifest, populated by
+	// discovery. It is never serialized to/from the manifest file and is used by
+	// the host to resolve plugin-local assets (e.g. the connector icon).
+	SourceDir string `json:"-" yaml:"-"`
 }
 
 type HealthState string

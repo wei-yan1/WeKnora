@@ -5,7 +5,7 @@ version: 1.0.0
 extension_type: datasource
 protocol_version: v1
 entrypoint: ./weknora-plugin-localdir-linux-amd64
-weknora_version: ">=1.0 <2.0"
+weknora_version: ">=0.7 <1.0"
 permissions:
   network: none
   read_paths: ["configured-root"]

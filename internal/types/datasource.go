@@ -25,19 +25,11 @@ const (
 	// ConnectorTypeLarkDrive is the Lark (international) Drive mode, the
 	// international counterpart of ConnectorTypeFeishuDrive.
 	ConnectorTypeLarkDrive   = "lark_drive"
-	ConnectorTypeNotion      = "notion"
-	ConnectorTypeConfluence  = "confluence"
-	ConnectorTypeYuque       = "yuque"
-	ConnectorTypeGitHub      = "github"
-	ConnectorTypeGoogleDrive = "google_drive"
-	ConnectorTypeOneDrive    = "onedrive"
-	ConnectorTypeDingTalk    = "dingtalk"
-	ConnectorTypeWebCrawler  = "web_crawler"
-	ConnectorTypeSlack       = "slack"
-	ConnectorTypeIMAP        = "imap"
-	ConnectorTypeRSS         = "rss"
-	ConnectorTypeGitLab      = "gitlab"
-	ConnectorTypeIMA         = "ima"
+	ConnectorTypeNotion = "notion"
+	ConnectorTypeYuque  = "yuque"
+	ConnectorTypeRSS    = "rss"
+	ConnectorTypeGitLab = "gitlab"
+	ConnectorTypeIMA    = "ima"
 
 	// Sync modes
 	SyncModeIncremental = "incremental"

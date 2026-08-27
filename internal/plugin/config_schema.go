@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+
+	"github.com/Tencent/WeKnora/internal/datasource"
 )
 
 // EffectiveConfigSchema returns the explicit schema, or derives the same
@@ -71,6 +73,13 @@ func validateSchemaValue(path string, schema map[string]any, value any) error {
 	if expected, ok := schema["type"].(string); ok && !jsonTypeMatches(expected, value) {
 		return fmt.Errorf("%s must be %s", path, expected)
 	}
+	if t, _ := schema["type"].(string); t == "url" {
+		if s, ok := value.(string); ok && strings.TrimSpace(s) != "" {
+			if err := datasource.ValidateConnectorBaseURL(s); err != nil {
+				return fmt.Errorf("%s failed SSRF validation: %w", path, err)
+			}
+		}
+	}
 	if enum, ok := schema["enum"].([]any); ok && value != nil {
 		matched := false
 		for _, candidate := range enum {
@@ -137,7 +146,7 @@ func jsonTypeMatches(expected string, value any) bool {
 			}
 		}
 		return true
-	case "string", "directory", "path":
+	case "string", "directory", "path", "url":
 		_, ok := value.(string)
 		return ok
 	case "boolean":

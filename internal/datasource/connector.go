@@ -235,14 +235,6 @@ var ConnectorMetadataRegistry = map[string]ConnectorMetadata{
 		AuthType:     "api_key",
 		Capabilities: []string{"incremental"},
 	},
-	types.ConnectorTypeConfluence: {
-		Type:         types.ConnectorTypeConfluence,
-		Name:         "Confluence",
-		Description:  "Sync spaces and pages from Atlassian Confluence",
-		Priority:     2,
-		AuthType:     "api_key",
-		Capabilities: []string{"incremental"},
-	},
 	types.ConnectorTypeYuque: {
 		Type:         types.ConnectorTypeYuque,
 		Name:         "Yuque (语雀)",
@@ -258,62 +250,6 @@ var ConnectorMetadataRegistry = map[string]ConnectorMetadata{
 		Priority:     3,
 		AuthType:     "api_key",
 		Capabilities: []string{"incremental", "deletion_sync"},
-	},
-	types.ConnectorTypeGitHub: {
-		Type:         types.ConnectorTypeGitHub,
-		Name:         "GitHub",
-		Description:  "Sync repositories, wikis, and issues from GitHub",
-		Priority:     4,
-		AuthType:     "oauth2",
-		Capabilities: []string{"incremental"},
-	},
-	types.ConnectorTypeGoogleDrive: {
-		Type:         types.ConnectorTypeGoogleDrive,
-		Name:         "Google Drive",
-		Description:  "Sync documents and files from Google Drive",
-		Priority:     5,
-		AuthType:     "oauth2",
-		Capabilities: []string{"incremental"},
-	},
-	types.ConnectorTypeOneDrive: {
-		Type:         types.ConnectorTypeOneDrive,
-		Name:         "OneDrive / SharePoint",
-		Description:  "Sync documents and files from Microsoft OneDrive",
-		Priority:     6,
-		AuthType:     "oauth2",
-		Capabilities: []string{"incremental"},
-	},
-	types.ConnectorTypeDingTalk: {
-		Type:         types.ConnectorTypeDingTalk,
-		Name:         "DingTalk (钉钉)",
-		Description:  "Sync documents and content from DingTalk",
-		Priority:     7,
-		AuthType:     "api_key",
-		Capabilities: []string{"incremental"},
-	},
-	types.ConnectorTypeWebCrawler: {
-		Type:         types.ConnectorTypeWebCrawler,
-		Name:         "Web Crawler (Sitemap)",
-		Description:  "Crawl websites via Sitemap.xml",
-		Priority:     9,
-		AuthType:     "none",
-		Capabilities: []string{},
-	},
-	types.ConnectorTypeSlack: {
-		Type:         types.ConnectorTypeSlack,
-		Name:         "Slack",
-		Description:  "Sync channel messages and files from Slack",
-		Priority:     10,
-		AuthType:     "oauth2",
-		Capabilities: []string{"incremental"},
-	},
-	types.ConnectorTypeIMAP: {
-		Type:         types.ConnectorTypeIMAP,
-		Name:         "Email (IMAP)",
-		Description:  "Sync email content from IMAP servers",
-		Priority:     11,
-		AuthType:     "password",
-		Capabilities: []string{},
 	},
 	types.ConnectorTypeRSS: {
 		Type:         types.ConnectorTypeRSS,
@@ -343,6 +279,17 @@ var externalConnectorMetadata = struct {
 	items map[string]ConnectorMetadata
 }{items: make(map[string]ConnectorMetadata)}
 
+// externalConnectorIconFiles records the on-disk icon file for an external
+// connector, keyed by connector type. It is populated alongside
+// RegisterExternalConnectorMetadata so the HTTP icon endpoint can stream the
+// plugin-bundled icon without exposing the plugin directory path in the API.
+// Keys are connector types that carry a local (relative) icon; a nil/empty
+// path means the connector has no local icon file.
+var externalConnectorIconFiles = struct {
+	sync.RWMutex
+	items map[string]string
+}{items: make(map[string]string)}
+
 // RegisterExternalConnectorMetadata records metadata for a connector backed by
 // an external plugin. The plugin framework calls this when a datasource plugin
 // is loaded; the type must match the connector type the plugin registered.
@@ -352,12 +299,36 @@ func RegisterExternalConnectorMetadata(meta ConnectorMetadata) {
 	externalConnectorMetadata.items[meta.Type] = meta
 }
 
+// RegisterExternalConnectorIconFile records the absolute path of a plugin's
+// local icon file for a connector type. Call this after
+// RegisterExternalConnectorMetadata so the icon endpoint can serve it.
+func RegisterExternalConnectorIconFile(connectorType, iconFile string) {
+	externalConnectorIconFiles.Lock()
+	defer externalConnectorIconFiles.Unlock()
+	if iconFile == "" {
+		delete(externalConnectorIconFiles.items, connectorType)
+		return
+	}
+	externalConnectorIconFiles.items[connectorType] = iconFile
+}
+
+// ResolveExternalConnectorIconFile returns the on-disk icon file path for an
+// external connector type, or "" when the connector has no local icon.
+func ResolveExternalConnectorIconFile(connectorType string) string {
+	externalConnectorIconFiles.RLock()
+	defer externalConnectorIconFiles.RUnlock()
+	return externalConnectorIconFiles.items[connectorType]
+}
+
 // UnregisterExternalConnectorMetadata removes metadata for an external plugin
 // connector (used on plugin unload).
 func UnregisterExternalConnectorMetadata(connectorType string) {
 	externalConnectorMetadata.Lock()
 	defer externalConnectorMetadata.Unlock()
 	delete(externalConnectorMetadata.items, connectorType)
+	externalConnectorIconFiles.Lock()
+	delete(externalConnectorIconFiles.items, connectorType)
+	externalConnectorIconFiles.Unlock()
 }
 
 // ListAvailableConnectors returns all available connector metadata

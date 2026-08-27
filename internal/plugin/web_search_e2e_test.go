@@ -44,7 +44,7 @@ func TestExternalWebSearchProcessRuntime(t *testing.T) {
 	searchRegistry := infraWebSearch.NewRegistry()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	require.NoError(t, LoadExternalWithRegistries(ctx, []string{pluginRoot}, manager, datasource.NewConnectorRegistry(), searchRegistry))
+	require.NoError(t, LoadExternalWithRegistries(ctx, []string{pluginRoot}, manager, datasource.NewConnectorRegistry(), searchRegistry, nil))
 	t.Cleanup(func() {
 		searchRegistry.Unregister("template_search")
 		_ = manager.Unregister(context.Background(), manifest.ID)
