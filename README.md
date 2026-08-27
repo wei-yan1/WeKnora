@@ -148,3 +148,19 @@ plugins/
 - 模型管理的前端"plugin source"选项、检索引擎的前端 schema/credential 配置界面、解析的流式化、WebSearch 的统一 settings/credentials，仍是后续课题需要补齐的 P1 项；
 - Docker 沙箱是硬隔离的唯一边界；ProcessRuntime 仅供开发；
 - 受控 Egress 代理（`allowlist` 的网络层强制）尚未实现，SDK 层 GuardedHTTPClient 是软约束。
+
+---
+
+## 八、运行效果截图
+
+以下截图来自外部数据源插件的实际运行，展示了「插件类型动态出现在创建列表 → 配置 → 同步 → 文档进入知识库」的完整链路：
+
+![数据源类型选择：外部插件类型自动出现在创建列表](docs/images/datasource-types-selection.png)
+
+![Local Directory 插件：增量同步成功](docs/images/datasource-localdir-sync.png)
+
+![GitHub 插件：同步成功（22 个文档，6 个失败提示）](docs/images/datasource-github-sync.png)
+
+![DingTalk 插件：增量同步成功](docs/images/datasource-dingtalk-sync.png)
+
+![GitHub 同步进入知识库的文档列表](docs/images/knowledge-github-docs.png)
