@@ -3,8 +3,10 @@ package provider
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
+	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/pkg/pluginapi"
 	pluginproto "github.com/Tencent/WeKnora/pkg/pluginapi/proto"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -35,6 +37,48 @@ type ModelCallResolver func(ctx context.Context, providerName string) (
 // externalModelResolvers holds the call-time resolvers of externally loaded
 // model plugins, keyed by provider name (the plugin manifest ID / provider).
 var externalModelResolvers sync.Map // provider name -> ModelCallResolver
+
+// ExternalModelInfo describes the static metadata of one registered external
+// model plugin. The /models/providers endpoint merges these into the provider
+// list so the frontend can render plugin-backed providers dynamically (the same
+// paradigm as web-search provider types).
+type ExternalModelInfo struct {
+	Provider     string                              `json:"provider"`
+	Name         string                              `json:"name"`
+	Description  string                              `json:"description"`
+	Capabilities []string                            `json:"capabilities"`
+	ConfigFields []types.WebSearchProviderConfigField `json:"config_fields,omitempty"`
+}
+
+// externalModelInfos holds the static metadata of externally loaded model
+// plugins, keyed by provider name. It is populated at plugin load time and read
+// by the provider listing endpoint.
+var externalModelInfos sync.Map // provider name -> ExternalModelInfo
+
+// RegisterExternalModelInfo records the static metadata of an external model
+// plugin under the given provider name.
+func RegisterExternalModelInfo(info ExternalModelInfo) {
+	externalModelInfos.Store(info.Provider, info)
+}
+
+// UnregisterExternalModelInfo removes an external model plugin's metadata.
+func UnregisterExternalModelInfo(providerName string) {
+	externalModelInfos.Delete(providerName)
+}
+
+// ListExternalModels returns the metadata of all registered external model
+// plugins in a stable (provider-name sorted) order.
+func ListExternalModels() []ExternalModelInfo {
+	var out []ExternalModelInfo
+	externalModelInfos.Range(func(_, value any) bool {
+		if info, ok := value.(ExternalModelInfo); ok {
+			out = append(out, info)
+		}
+		return true
+	})
+	sort.Slice(out, func(i, j int) bool { return out[i].Provider < out[j].Provider })
+	return out
+}
 
 // RegisterExternalModelResolver records the call-time resolver of an external
 // model plugin under the given provider name.

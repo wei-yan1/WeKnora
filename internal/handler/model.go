@@ -701,6 +701,10 @@ type ModelProviderDTO struct {
 	Description string            `json:"description"` // 描述
 	DefaultURLs map[string]string `json:"defaultUrls"` // 按模型类型区分的默认 URL
 	ModelTypes  []string          `json:"modelTypes"`  // 支持的模型类型
+	// Source 为 "plugin" 时表示外部 model 插件（其余为内置 provider）。
+	Source string `json:"source,omitempty"`
+	// ConfigFields 是插件声明的非保留配置字段，前端据此动态渲染表单。
+	ConfigFields []types.WebSearchProviderConfigField `json:"configFields,omitempty"`
 }
 
 // modelTypeToFrontend 将后端 ModelType 转换为前端兼容的字符串
@@ -793,9 +797,35 @@ func (h *ModelHandler) ListModelProviders(c *gin.Context) {
 		})
 	}
 
+	// 合并外部 model 插件（source=plugin）。外部插件的 capabilities 即模型类型
+	// （chat/embedding/rerank/vllm/asr），按前端 modelType 字符串过滤。
+	for _, ext := range provider.ListExternalModels() {
+		if modelType != "" && !stringSliceContains(ext.Capabilities, modelType) {
+			continue
+		}
+		result = append(result, ModelProviderDTO{
+			Value:        ext.Provider,
+			Label:        ext.Name,
+			Description:  ext.Description,
+			Source:       "plugin",
+			ConfigFields: ext.ConfigFields,
+			ModelTypes:   ext.Capabilities,
+		})
+	}
+
 	logger.Infof(ctx, "Retrieved %d providers", len(result))
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data":    result,
 	})
+}
+
+// stringSliceContains reports whether s contains target.
+func stringSliceContains(s []string, target string) bool {
+	for _, v := range s {
+		if v == target {
+			return true
+		}
+	}
+	return false
 }

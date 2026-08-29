@@ -7,9 +7,18 @@ import (
 	"time"
 
 	modelprovider "github.com/Tencent/WeKnora/internal/models/provider"
+	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/pkg/pluginapi"
 	pluginproto "github.com/Tencent/WeKnora/pkg/pluginapi/proto"
 )
+
+// modelReservedKeys are the config keys with dedicated host-side model form
+// sections (api_key / base_url boxes in ModelEditorDialog). They never surface
+// as custom ConfigFields, so the frontend never renders them twice.
+var modelReservedKeys = map[string]struct{}{
+	"api_key":  {},
+	"base_url": {},
+}
 
 // RegisterExternalModel wires an external model plugin into the host model
 // provider registry. Model capability factories (chat.NewChat, ...) are
@@ -74,6 +83,28 @@ func RegisterExternalModel(manager *Manager, manifest Manifest, runtime Runtime,
 		callCtx := pluginapi.WithInvocationContext(lease.Context, invocationFromContext(ctx, ""))
 		return pluginapi.NewModelPluginClient(conn), callCtx, lease.Close, nil
 	})
+
+	// Record static metadata so the /models/providers endpoint can merge this
+	// external plugin into the provider list for dynamic frontend rendering.
+	description := ""
+	if manifest.Metadata != nil {
+		if v, ok := manifest.Metadata["description"].(string); ok {
+			description = strings.TrimSpace(v)
+		}
+	}
+	var configFields []types.WebSearchProviderConfigField
+	if len(manifest.ConfigSchema) > 0 {
+		configFields = configFieldsFromSchema(manifest.ConfigSchema, modelReservedKeys)
+	} else {
+		configFields = configFieldsFromLegacy(manifest.Config, modelReservedKeys)
+	}
+	modelprovider.RegisterExternalModelInfo(modelprovider.ExternalModelInfo{
+		Provider:     modelProvider,
+		Name:         manifest.Name,
+		Description:  description,
+		Capabilities: manifest.Capabilities,
+		ConfigFields: configFields,
+	})
 	return modelProvider, nil
 }
 
@@ -82,6 +113,7 @@ func RegisterExternalModel(manager *Manager, manifest Manifest, runtime Runtime,
 // client so future model resolution stops finding the plugin.
 func UnregisterExternalModel(providerName string) {
 	modelprovider.UnregisterExternalModelResolver(providerName)
+	modelprovider.UnregisterExternalModelInfo(providerName)
 }
 
 // verifyModelCapabilities ensures every capability declared in the manifest is

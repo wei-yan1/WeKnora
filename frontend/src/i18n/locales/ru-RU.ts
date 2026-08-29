@@ -2286,6 +2286,8 @@ export default {
       sourceLabel: 'Источник модели',
       sourceLocal: 'Ollama',
       sourceRemote: 'API',
+      sourcePlugin: 'Плагин',
+      pluginBaseUrlDesc: 'Необязательно. Оставьте пустым для значения по умолчанию плагина.',
       baseUrlLabel: 'Base URL',
       displayNameLabel: 'Отображаемое имя (опционально)',
       displayNamePlaceholder: 'например: модель поддержки',

@@ -168,10 +168,11 @@ func decodeChatResponse(resp *pluginproto.ModelChatResponse) *types.ChatResponse
 
 func decodeStreamChunk(chunk *pluginproto.ModelStreamResponse) types.StreamResponse {
 	out := types.StreamResponse{
-		ResponseType: types.ResponseTypeAnswer,
-		Content:      chunk.GetContent(),
-		Done:         chunk.GetDone(),
-		FinishReason: chunk.GetFinishReason(),
+		ResponseType:      types.ResponseTypeAnswer,
+		Content:           chunk.GetContent(),
+		Done:              chunk.GetDone(),
+		FinishReason:      chunk.GetFinishReason(),
+		ReasoningContent:  chunk.GetReasoningContent(),
 	}
 	if usage := chunk.GetUsage(); usage != nil {
 		out.Usage = &types.TokenUsage{

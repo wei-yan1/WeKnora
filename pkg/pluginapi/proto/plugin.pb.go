@@ -1934,15 +1934,16 @@ func (x *ModelChatResponse) GetError() string {
 }
 
 type ModelStreamResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Content       string                 `protobuf:"bytes,1,opt,name=content,proto3" json:"content,omitempty"`
-	Done          bool                   `protobuf:"varint,2,opt,name=done,proto3" json:"done,omitempty"`
-	ToolCalls     []*ModelChatToolCall   `protobuf:"bytes,3,rep,name=tool_calls,json=toolCalls,proto3" json:"tool_calls,omitempty"`
-	FinishReason  string                 `protobuf:"bytes,4,opt,name=finish_reason,json=finishReason,proto3" json:"finish_reason,omitempty"`
-	Usage         *ModelTokenUsage       `protobuf:"bytes,5,opt,name=usage,proto3" json:"usage,omitempty"`
-	Error         string                 `protobuf:"bytes,6,opt,name=error,proto3" json:"error,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Content          string                 `protobuf:"bytes,1,opt,name=content,proto3" json:"content,omitempty"`
+	Done             bool                   `protobuf:"varint,2,opt,name=done,proto3" json:"done,omitempty"`
+	ToolCalls        []*ModelChatToolCall   `protobuf:"bytes,3,rep,name=tool_calls,json=toolCalls,proto3" json:"tool_calls,omitempty"`
+	FinishReason     string                 `protobuf:"bytes,4,opt,name=finish_reason,json=finishReason,proto3" json:"finish_reason,omitempty"`
+	Usage            *ModelTokenUsage       `protobuf:"bytes,5,opt,name=usage,proto3" json:"usage,omitempty"`
+	Error            string                 `protobuf:"bytes,6,opt,name=error,proto3" json:"error,omitempty"`
+	ReasoningContent string                 `protobuf:"bytes,7,opt,name=reasoning_content,json=reasoningContent,proto3" json:"reasoning_content,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *ModelStreamResponse) Reset() {
@@ -2013,6 +2014,13 @@ func (x *ModelStreamResponse) GetUsage() *ModelTokenUsage {
 func (x *ModelStreamResponse) GetError() string {
 	if x != nil {
 		return x.Error
+	}
+	return ""
+}
+
+func (x *ModelStreamResponse) GetReasoningContent() string {
+	if x != nil {
+		return x.ReasoningContent
 	}
 	return ""
 }
@@ -3645,7 +3653,7 @@ const file_plugin_proto_rawDesc = "" +
 	"tool_calls\x18\x03 \x03(\v2$.weknora.plugin.v1.ModelChatToolCallR\ttoolCalls\x12#\n" +
 	"\rfinish_reason\x18\x04 \x01(\tR\ffinishReason\x128\n" +
 	"\x05usage\x18\x05 \x01(\v2\".weknora.plugin.v1.ModelTokenUsageR\x05usage\x12\x14\n" +
-	"\x05error\x18\x06 \x01(\tR\x05error\"\xfd\x01\n" +
+	"\x05error\x18\x06 \x01(\tR\x05error\"\xaa\x02\n" +
 	"\x13ModelStreamResponse\x12\x18\n" +
 	"\acontent\x18\x01 \x01(\tR\acontent\x12\x12\n" +
 	"\x04done\x18\x02 \x01(\bR\x04done\x12C\n" +
@@ -3653,7 +3661,8 @@ const file_plugin_proto_rawDesc = "" +
 	"tool_calls\x18\x03 \x03(\v2$.weknora.plugin.v1.ModelChatToolCallR\ttoolCalls\x12#\n" +
 	"\rfinish_reason\x18\x04 \x01(\tR\ffinishReason\x128\n" +
 	"\x05usage\x18\x05 \x01(\v2\".weknora.plugin.v1.ModelTokenUsageR\x05usage\x12\x14\n" +
-	"\x05error\x18\x06 \x01(\tR\x05error\"'\n" +
+	"\x05error\x18\x06 \x01(\tR\x05error\x12\x2b\n" +
+	"\x11reasoning_content\x18\a \x01(\tR\x10reasoningContent\"'\n" +
 	"\x11ModelEmbedRequest\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\"b\n" +
 	"\x12ModelEmbedResponse\x12\x16\n" +

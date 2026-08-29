@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"sort"
 	"strings"
 
 	infraWebSearch "github.com/Tencent/WeKnora/internal/infrastructure/web_search"
@@ -106,9 +105,9 @@ func webSearchProviderTypeInfo(manifest Manifest, providerType string) types.Web
 	// fall back to the legacy config list. Reserved keys never surface as
 	// custom fields — they already render through dedicated form sections.
 	if len(manifest.ConfigSchema) > 0 {
-		info.ConfigFields = webSearchConfigFieldsFromSchema(manifest.ConfigSchema)
+		info.ConfigFields = configFieldsFromSchema(manifest.ConfigSchema, webSearchReservedKeys)
 	} else {
-		info.ConfigFields = webSearchConfigFieldsFromLegacy(manifest.Config)
+		info.ConfigFields = configFieldsFromLegacy(manifest.Config, webSearchReservedKeys)
 	}
 	return info
 }
@@ -141,131 +140,4 @@ var webSearchReservedKeys = map[string]struct{}{
 	"engine_id": {},
 	"base_url":  {},
 	"proxy_url": {},
-}
-
-// webSearchConfigFieldsFromSchema converts a flat JSON-Schema declaration
-// (properties keyed by field name) into frontend-renderable ConfigFields.
-//
-// Field typing:
-//
-//	string           → text input        (secret:true → password input)
-//	boolean          → switch
-//	integer / number → number input
-//	array / string[] → comma-separated text input
-//	enum present     → select (options derived from the enum values)
-//
-// Values persist in ExtraConfig as STRINGS regardless of type; the plugin
-// parses them on its side. Sensitive credentials must use the reserved
-// api_key key — extra fields are stored in plaintext by design.
-func webSearchConfigFieldsFromSchema(schema map[string]any) []types.WebSearchProviderConfigField {
-	properties, _ := schema["properties"].(map[string]any)
-	if len(properties) == 0 {
-		return nil
-	}
-	requiredSet := map[string]struct{}{}
-	if raw, ok := schema["required"].([]any); ok {
-		for _, item := range raw {
-			if key, ok := item.(string); ok {
-				requiredSet[strings.TrimSpace(key)] = struct{}{}
-			}
-		}
-	}
-	keys := make([]string, 0, len(properties))
-	for key := range properties {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	fields := make([]types.WebSearchProviderConfigField, 0, len(keys))
-	for _, key := range keys {
-		if _, reserved := webSearchReservedKeys[key]; reserved {
-			continue
-		}
-		property, _ := properties[key].(map[string]any)
-		if property == nil {
-			continue
-		}
-		title, _ := property["title"].(string)
-		description, _ := property["description"].(string)
-		jsonType, _ := property["type"].(string)
-		secret, _ := property["secret"].(bool)
-		enum, _ := property["enum"].([]any)
-		_, isRequired := requiredSet[key]
-		fields = append(fields, types.WebSearchProviderConfigField{
-			Key:         key,
-			Label:       title,
-			Type:        webSearchConfigFieldType(jsonType, secret, len(enum) > 0),
-			Required:    isRequired,
-			Default:     configFieldDefaultString(property["default"]),
-			Description: description,
-			Options:     webSearchEnumOptions(enum),
-		})
-	}
-	return fields
-}
-
-// webSearchConfigFieldsFromLegacy converts the concise config list into
-// ConfigFields, skipping reserved keys (they render through dedicated
-// host-side form sections). Label falls back to Description because the
-// legacy list has no separate title.
-func webSearchConfigFieldsFromLegacy(config []ConfigField) []types.WebSearchProviderConfigField {
-	fields := make([]types.WebSearchProviderConfigField, 0, len(config))
-	for _, field := range config {
-		key := strings.TrimSpace(field.Key)
-		if _, reserved := webSearchReservedKeys[key]; reserved {
-			continue
-		}
-		enum := make([]any, len(field.Enum))
-		for i, value := range field.Enum {
-			enum[i] = value
-		}
-		fields = append(fields, types.WebSearchProviderConfigField{
-			Key:         key,
-			Label:       field.Description,
-			Type:        webSearchConfigFieldType(field.Type, field.Secret, len(field.Enum) > 0),
-			Required:    field.Required,
-			Default:     configFieldDefaultString(field.Default),
-			Description: field.Description,
-			Options:     webSearchEnumOptions(enum),
-		})
-	}
-	return fields
-}
-
-// webSearchConfigFieldType normalizes a type declaration into the frontend
-// rendering intent. An enum always wins (rendered as a select).
-func webSearchConfigFieldType(declaredType string, secret bool, hasEnum bool) string {
-	if hasEnum {
-		return "select"
-	}
-	switch declaredType {
-	case "boolean":
-		return "boolean"
-	case "integer", "number":
-		return "number"
-	case "array", "string[]":
-		return "array"
-	}
-	if secret {
-		return "secret"
-	}
-	return "string"
-}
-
-func webSearchEnumOptions(values []any) []types.WebSearchProviderConfigFieldOption {
-	if len(values) == 0 {
-		return nil
-	}
-	options := make([]types.WebSearchProviderConfigFieldOption, 0, len(values))
-	for _, value := range values {
-		text := fmt.Sprint(value)
-		options = append(options, types.WebSearchProviderConfigFieldOption{Label: text, Value: text})
-	}
-	return options
-}
-
-func configFieldDefaultString(value any) string {
-	if value == nil {
-		return ""
-	}
-	return fmt.Sprint(value)
 }

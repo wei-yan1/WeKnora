@@ -133,6 +133,17 @@ func (myModel) ChatStream(ctx context.Context, req pluginapi.ChatRequest, emit f
 }
 ```
 
+`StreamChunk` 除 `Content` 外还带 `ReasoningContent`（思考链内容）。对接 OpenAI o1、DeepSeek reasoner、MiMo 等 **reasoning 类模型**时，流式响应里模型会先吐 `reasoning_content` 再吐正文，插件应把两者都回传，否则宿主/前端会丢失思考过程：
+
+```go
+emit(pluginapi.StreamChunk{
+    Content:          delta.Content,
+    ReasoningContent: delta.ReasoningContent,
+})
+```
+
+> 注意：`ChatResult`（非流式）和 `StreamChunk`（流式）都**必须**保留 `ReasoningContent`，且多轮对话中要把上一轮 assistant 的 `reasoning_content` 原样回传（部分供应商要求，否则以 400 拒绝）。
+
 ## 5. `plugin.yaml` 示例
 
 ```yaml
@@ -212,6 +223,52 @@ func (myModel) Embed(ctx context.Context, text string) ([]float32, error) {
 
 > **边界**：`ModelContext` 只传模型身份（id/name），**不传 `base_url` / `api_key`**——那两者是插件级 `config`（见第 5 节），由插件自己在进程内维护。因此 v1 的「一个进程多实例」是「共享同一 `base_url` + `api_key`、`model_id` 不同」的场景（即同一厂商的多模型）；「不同租户各自持有不同 key」这类更细粒度隔离不在 v1 范围内。
 
+### 6.2 配置传递与缓存（重要）
+
+`base_url` / `api_key` 只在**保存模型时**通过 `ValidateConfig` RPC 传入**一次**，`Chat` / `ChatStream` 调用时**不携带**。因此插件必须在 `OnValidateConfig` 里缓存，后续调用时按 `ModelID` / `ModelName` 取回。宿主传入的 config 是一个**扁平 map**：
+
+```go
+map[string]any{
+    "model_id":   model.ID,               // 宿主库中该模型记录的唯一 ID（可用于精确缓存）
+    "model_name": model.Name,             // 用户填的「模型名称」
+    "base_url":   model.Parameters.BaseURL,
+    "api_key":    model.Parameters.APIKey,
+    // ... 其余是 extra_config 的扁平键值
+}
+```
+
+缓存建议：以 `model_id` 为主 key、`model_name` 为辅 key，并保留一份「最近一次」作为全局兜底（同一 provider 下多个模型通常共享同一份 `base_url` + `api_key`）。
+
+SDK 已提供现成的 `pluginapi.ConfigStore` 帮你完成这段缓存，无需手写：
+
+```go
+type myModel struct {
+    configs *pluginapi.ConfigStore
+}
+
+func (m *myModel) validateConfig(_ context.Context, cfg map[string]any) error {
+    m.configs.PutFromValidate(cfg) // 一行缓存
+    return nil
+}
+
+func (m *myModel) chat(_ context.Context, req pluginapi.ChatRequest) (pluginapi.ChatResult, error) {
+    apiKey := m.configs.GetString(req.ModelID, req.ModelName, "api_key")
+    baseURL := m.configs.GetString(req.ModelID, req.ModelName, "base_url")
+    // ... 用 apiKey / baseURL 调用上游模型服务
+}
+```
+
+`ConfigStore` 提供 `NewConfigStore` / `PutFromValidate` / `Get` / `GetString` 四个方法，内部线程安全。`Embed` / `Rerank` / `PredictVLM` / `Transcribe` 等回调签名里没有 model 参数时，先用 `pluginapi.ModelContextFromContext(ctx)` 拿到 `ModelID` / `ModelName`，再传入 `Get` / `GetString`。
+
+> 注意：`ConfigStore` 是进程内缓存，**插件进程重启后会清空**。此时需等待宿主再次「保存模型」触发 `ValidateConfig` 恢复缓存——插件无需特殊处理，宿主侧 resolver 会保证重启后的首次调用能拿到新的运行时连接。
+
+### 6.3 模型名 ≠ provider 名（常见误区）
+
+- `metadata.provider`（如 `openai`）是**宿主路由用**的 provider 标识，宿主按它找到对应的插件 resolver，**不会**发给上游模型服务。
+- **模型名**是用户在前端「模型名称」输入框填写的，经 `ModelContext.ModelName` 传给插件。插件应把它**原样**作为 OpenAI 兼容请求的 `model` 字段发给上游（如 `gpt-4o`、`text-embedding-3-large`）。
+
+若用户把 provider 名误填成模型名（例如填了 `openai` 而非 `gpt-4o`），上游 API 会返回 400「invalid model」。插件可自行校验模型名，或在文档/前端提示用户填写真实模型名。
+
 ## 7. 校验与验证
 
 SDK 提供 `RunModelConformance`，可对模型插件做协议级冒烟测试（与 DataSource / Parser / WebSearch 三者对齐）。它依次：
@@ -247,3 +304,26 @@ Model 插件**只负责「模型能力的实际调用」**（把请求发给模�
 - 租户校验、权限、限流——宿主处理（通过 resolver 里的 admission + invocation context 注入）。
 
 插件内部可自行管理模型服务的连接池、重试、密钥轮换等，宿主不关心。
+
+## 9. 部署注意（实战经验）
+
+### 9.1 双平台二进制
+
+`plugin.yaml` 的 `entrypoint` 通常写**无后缀**名字（如 `./my-model-plugin`）。宿主在 Linux / WSL 下执行这个无后缀文件，在 Windows 下执行 `.exe`。因此插件目录里建议**同时提供两个二进制**：
+
+```
+my-model-plugin/          ← Linux 可执行文件（无后缀）
+my-model-plugin.exe       ← Windows 可执行文件
+```
+
+### 9.2 交叉编译
+
+纯 Go 插件（只依赖 `pkg/pluginapi`）在 Windows 上交叉编译 Linux 二进制时，务必加 `CGO_ENABLED=0`，否则 `runtime/cgo` 会因缺 Linux 头文件而失败：
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o my-model-plugin .
+```
+
+### 9.3 `go.mod` 的 `replace` 相对路径
+
+独立插件仓库通过 `replace github.com/Tencent/WeKnora => ../path/to/weknora` 指向本地源码。**该相对路径是相对于插件 `go.mod` 所在目录**——插件目录层级一旦变化（例如从 `plugins/model/` 移到 `plugins/model/my-plugin/`），`../..` 就要相应变成 `../../..`，否则 `go build` 报 `replacement directory ... does not exist`。

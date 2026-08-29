@@ -97,11 +97,12 @@ type ChatResult struct {
 }
 
 type StreamChunk struct {
-	Content      string
-	Done         bool
-	ToolCalls    []ChatToolCall
-	FinishReason string
-	Usage        *TokenUsage
+	Content          string
+	ReasoningContent string
+	Done             bool
+	ToolCalls        []ChatToolCall
+	FinishReason     string
+	Usage            *TokenUsage
 }
 
 type RerankResult struct {
@@ -306,7 +307,7 @@ func encodeTokenUsage(u *TokenUsage) *pluginproto.ModelTokenUsage {
 }
 
 func encodeStreamChunk(chunk StreamChunk) *pluginproto.ModelStreamResponse {
-	out := &pluginproto.ModelStreamResponse{Content: chunk.Content, Done: chunk.Done, FinishReason: chunk.FinishReason}
+	out := &pluginproto.ModelStreamResponse{Content: chunk.Content, ReasoningContent: chunk.ReasoningContent, Done: chunk.Done, FinishReason: chunk.FinishReason}
 	if chunk.Usage != nil {
 		out.Usage = encodeTokenUsage(chunk.Usage)
 	}

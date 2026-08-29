@@ -3893,6 +3893,8 @@ export default {
       sourceLabel: 'Model Source',
       sourceLocal: 'Ollama',
       sourceRemote: 'API',
+      sourcePlugin: 'Plugin',
+      pluginBaseUrlDesc: 'Optional. Leave blank to use the plugin default.',
       description: {
         chat: 'Configure large language models for conversations',
         embedding: 'Configure embedding models for text vectorization',

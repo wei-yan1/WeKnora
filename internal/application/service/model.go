@@ -72,6 +72,7 @@ func (s *modelService) validatePluginModelConfig(ctx context.Context, model *typ
 		return apperrors.NewValidationError("provider is required for plugin models")
 	}
 	config := map[string]any{
+		"model_id":   model.ID,
 		"model_name": model.Name,
 		"base_url":   model.Parameters.BaseURL,
 		"api_key":    model.Parameters.APIKey,

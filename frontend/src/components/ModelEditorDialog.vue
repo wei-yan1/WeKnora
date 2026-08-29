@@ -83,6 +83,17 @@
               <t-icon name="server" class="source-option__icon" />
               <span class="source-option__label">{{ $t('model.editor.sourceLocal') }}</span>
             </button>
+            <button
+              type="button"
+              class="source-option"
+              :class="{ 'is-active': formData.source === 'plugin' }"
+              role="radio"
+              :aria-checked="formData.source === 'plugin'"
+              @click="formData.source = 'plugin'"
+            >
+              <t-icon name="extension" class="source-option__icon" />
+              <span class="source-option__label">{{ $t('model.editor.sourcePlugin') }}</span>
+            </button>
           </div>
 
           <!-- ReRank模型不支持Ollama的提示信息 -->
@@ -163,7 +174,7 @@
                 完整 label 的小气泡，但这里选项本身就是双行（主名 + 描述），不会
                 出现省略，tooltip 只会和已经命中的灰底打架。直接关掉。
               -->
-              <t-option v-for="opt in providerOptions" :key="opt.value" :value="opt.value" :label="opt.label"
+              <t-option v-for="opt in builtinProviderOptions" :key="opt.value" :value="opt.value" :label="opt.label"
                 :show-overflow-tooltip="false">
                 <div class="provider-option">
                   <span class="provider-name">{{ opt.label }}</span>
@@ -312,6 +323,65 @@
         </section>
       </template>
 
+      <!-- Plugin 配置（外部 model 插件，动态渲染 config_fields） -->
+      <template v-if="formData.source === 'plugin'">
+        <section class="setting-drawer__section">
+          <h4 class="setting-drawer__section-title">{{ $t('model.editor.sectionProvider') }}</h4>
+
+          <!-- 插件 provider 选择器（仅外部插件） -->
+          <div class="form-item">
+            <label class="form-label">{{ $t('model.editor.providerLabel') }}</label>
+            <t-select v-model="formData.provider" :placeholder="$t('model.editor.providerPlaceholder')"
+              @change="handleProviderChange" :popup-props="{ overlayClassName: 'provider-select-popup' }">
+              <t-option v-for="opt in pluginProviderOptions" :key="opt.value" :value="opt.value" :label="opt.label"
+                :show-overflow-tooltip="false">
+                <div class="provider-option">
+                  <span class="provider-name">{{ opt.label }}</span>
+                  <span class="provider-desc">{{ opt.description }}</span>
+                </div>
+              </t-option>
+            </t-select>
+          </div>
+
+          <!-- 模型名称 -->
+          <div class="form-item">
+            <label class="form-label required">{{ $t('model.modelName') }}</label>
+            <t-input v-model="formData.modelName" :placeholder="getModelNamePlaceholder()" />
+          </div>
+
+          <!-- Base URL（保留 key，DS 等插件声明 base_url） -->
+          <div class="form-item">
+            <label class="form-label">{{ $t('model.editor.baseUrlLabel') }}</label>
+            <t-input v-model="formData.baseUrl" :placeholder="getBaseUrlPlaceholder()" />
+            <p class="form-desc">{{ $t('model.editor.pluginBaseUrlDesc') }}</p>
+          </div>
+
+          <!-- API Key（保留 key，凭证走 /credentials 子资源） -->
+          <div class="form-item">
+            <label class="form-label">{{ $t('model.editor.apiKeyOptional') }}</label>
+            <CredentialResource v-if="isEdit && props.modelData?.id" :api="credentialApi" :fields="credentialFields"
+              :meta="credentialMeta" />
+            <t-input v-else v-model="formData.apiKey" :type="showApiKey ? 'text' : 'password'"
+              :placeholder="apiKeyPlaceholder" class="api-key-input" autocomplete="off" spellcheck="false">
+              <template #prefix-icon><t-icon name="lock-on" /></template>
+              <template #suffix-icon>
+                <t-icon :name="showApiKey ? 'browse-off' : 'browse'" class="api-key-toggle"
+                  :aria-label="showApiKey ? 'Hide' : 'Show'" @click.stop="showApiKey = !showApiKey" />
+              </template>
+            </t-input>
+          </div>
+
+          <!-- 插件动态配置字段（config_fields，跳过保留 key） -->
+          <SchemaFieldInput
+            v-for="field in currentPluginConfigFields"
+            :key="field.key"
+            :field="field"
+            :model-value="(formData.extraConfig || {})[field.key]"
+            @update:model-value="(v: unknown) => setPluginExtraConfig(field.key, v)"
+          />
+        </section>
+      </template>
+
       <!-- Section 3 — 高级选项（仅在有内容时渲染，避免空 section 出现底部分隔线） -->
       <section v-if="['embedding', 'chat', 'vllm'].includes(activeModelType)" class="setting-drawer__section">
         <h4 class="setting-drawer__section-title">{{ $t('model.editor.sectionAdvanced') }}</h4>
@@ -412,11 +482,13 @@ import {
   type ThinkingControlValue,
 } from '@/utils/thinkingControl'
 import SettingDrawer from '@/components/settings/SettingDrawer.vue'
+import SchemaFieldInput from '@/components/settings/SchemaFieldInput.vue'
 import CredentialResource, {
   type CredentialFieldDef,
   type CredentialResourceApi,
 } from '@/components/credentials/CredentialResource.vue'
 import { shouldShowOllamaUnavailableTip } from '@/components/modelEditorSourceState'
+import { deserializeConfigFieldValue } from '@/utils/configField'
 
 interface CustomHeaderItem {
   key: string
@@ -426,7 +498,7 @@ interface CustomHeaderItem {
 interface ModelFormData {
   id: string
   name: string
-  source: 'local' | 'remote'
+  source: 'local' | 'remote' | 'plugin'
   provider?: string // Provider identifier: openai, aliyun, zhipu, generic, etc.
   modelName: string
   displayName?: string
@@ -447,6 +519,8 @@ interface ModelFormData {
   appSecret?: string
   /** LKEAP Rerank：地域，如 ap-guangzhou */
   lkeapRegion?: string
+  /** 插件 config_fields 的运行时值（typed，保存时序列化为字符串写入 extra_config）。 */
+  extraConfig?: Record<string, any>
 }
 
 type EditorModelType = 'chat' | 'embedding' | 'rerank' | 'vllm' | 'asr'
@@ -491,7 +565,7 @@ const apiProviderOptions = ref<ModelProviderOption[]>([])
 const loadingProviders = ref(false)
 
 // 硬编码的后备 Provider 配置 (当 API 不可用时使用)
-const fallbackProviderOptions = computed(() => [
+const fallbackProviderOptions = computed<ModelProviderOption[]>(() => [
   {
     value: 'openai',
     label: t('model.editor.providers.openai.label'),
@@ -621,7 +695,7 @@ const fallbackProviderOptions = computed(() => [
     description: t('model.editor.providers.generic.description'),
     modelTypes: ['chat', 'embedding', 'rerank', 'vllm', 'asr']
   },
-])
+] as ModelProviderOption[])
 
 // 从 API 获取 Provider 列表
 const loadProviders = async () => {
@@ -631,6 +705,12 @@ const loadProviders = async () => {
     if (providers.length > 0) {
       apiProviderOptions.value = providers
     }
+    // Provider 列表异步加载完成后，补一次 plugin source 的 provider 校正：
+    // 用户可能在 loadProviders 完成前就点了「插件」按钮，彼时 pluginProviderOptions
+    // 尚为空，跳过自动切换；这里收尾时再校一次，确保 DS 这类插件被默认选中。
+    ensurePluginProviderSelected()
+    // 插件 config_fields 加载完成后，对编辑中的 extraConfig 做类型反序列化
+    hydratePluginExtraConfig()
   } catch (error) {
     console.error('Failed to load providers from API, using fallback', error)
   } finally {
@@ -638,9 +718,46 @@ const loadProviders = async () => {
   }
 }
 
+// 校正当前 plugin source 下的 provider 选中：若未选插件 provider 则切到第一个。
+const ensurePluginProviderSelected = () => {
+  if (formData.value.source !== 'plugin') return
+  if (pluginProviderOptions.value.length === 0) return
+  if (!pluginProviderOptions.value.some(p => p.value === formData.value.provider)) {
+    formData.value.provider = pluginProviderOptions.value[0].value
+    handleProviderChange(formData.value.provider)
+  }
+}
+
+// 编辑模式：把后端持久化的字符串值按 config_fields 类型反序列化为表单 typed 值。
+// 新建模式由 handleProviderChange 填充默认值，这里只在编辑时收敛一次。
+const hydratePluginExtraConfig = () => {
+  if (!isEdit.value || formData.value.source !== 'plugin') return
+  const fields = currentPluginConfigFields.value
+  if (fields.length === 0) return
+  const raw = formData.value.extraConfig || {}
+  const out: Record<string, any> = {}
+  for (const field of fields) {
+    const value = raw[field.key]
+    if (value !== undefined) {
+      out[field.key] = deserializeConfigFieldValue(field, value)
+    } else if (field.default !== undefined && field.default !== '') {
+      out[field.key] = deserializeConfigFieldValue(field, field.default)
+    }
+  }
+  formData.value.extraConfig = out
+}
+
+// 写入插件 config_fields 的某个字段值（惰性初始化 extraConfig）。
+const setPluginExtraConfig = (key: string, value: unknown) => {
+  if (!formData.value.extraConfig) {
+    formData.value.extraConfig = {}
+  }
+  formData.value.extraConfig[key] = value
+}
+
 // 根据当前模型类型过滤的 Provider 列表
 // API 返回的 defaultUrls/modelTypes 数据优先，但 label/description 使用 i18n
-const providerOptions = computed(() => {
+const providerOptions = computed<ModelProviderOption[]>(() => {
   // API 数据可用时，用 API 的结构数据 + i18n 的显示文本
   if (apiProviderOptions.value.length > 0) {
     return apiProviderOptions.value.map(p => ({
@@ -657,6 +774,22 @@ const providerOptions = computed(() => {
   return fallbackProviderOptions.value.filter(p =>
     p.modelTypes.includes(activeModelType.value)
   )
+})
+
+// 外部 model 插件（source=plugin），由后端 /models/providers 动态返回。
+const pluginProviderOptions = computed(() =>
+  providerOptions.value.filter(p => p.source === 'plugin')
+)
+
+// 内置 provider（排除外部插件），remote source 的 provider 下拉只显示这些。
+const builtinProviderOptions = computed(() =>
+  providerOptions.value.filter(p => p.source !== 'plugin')
+)
+
+// 当前选中插件的 config_fields，用于动态渲染配置表单。
+const currentPluginConfigFields = computed(() => {
+  const provider = pluginProviderOptions.value.find(p => p.value === formData.value.provider)
+  return provider?.configFields || []
 })
 
 const dialogVisible = computed({
@@ -879,6 +1012,7 @@ const formData = ref<ModelFormData>({
   customHeaders: [],
   appSecret: '',
   lkeapRegion: 'ap-guangzhou',
+  extraConfig: {},
 })
 
 const rules = computed(() => ({
@@ -1120,6 +1254,7 @@ const resetForm = () => {
     customHeaders: [],
     appSecret: '',
     lkeapRegion: 'ap-guangzhou',
+    extraConfig: {},
   }
   modelChecked.value = false
   modelAvailable.value = false
@@ -1152,6 +1287,17 @@ const handleProviderChange = (value: string) => {
     remoteAvailable.value = false
     remoteMessage.value = ''
   }
+  // 外部插件 provider：用 config_fields 的 default 填充 extraConfig
+  if (provider?.source === 'plugin') {
+    const defaults: Record<string, any> = {}
+    for (const field of provider.configFields || []) {
+      if (field.default !== undefined && field.default !== '') {
+        defaults[field.key] = deserializeConfigFieldValue(field, field.default)
+      }
+    }
+    formData.value.extraConfig = { ...defaults, ...(formData.value.extraConfig || {}) }
+  }
+
   // WeKnoraCloud: 检查凭证状态
   if (value === 'weknoracloud') {
     checkWkcCredentialStatus()
@@ -1677,6 +1823,17 @@ watch(() => formData.value.source, () => {
   ) {
     thinkingControlManual.value = false
     syncThinkingControlToForm(true)
+  }
+
+  // 切到 plugin source 时，默认选中第一个插件 provider 并填充默认 config_fields
+  if (
+    !hydratingForm.value
+    && formData.value.source === 'plugin'
+    && pluginProviderOptions.value.length > 0
+    && !pluginProviderOptions.value.some(p => p.value === formData.value.provider)
+  ) {
+    formData.value.provider = pluginProviderOptions.value[0].value
+    handleProviderChange(formData.value.provider)
   }
 })
 

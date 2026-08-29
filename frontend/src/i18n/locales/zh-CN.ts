@@ -2288,6 +2288,8 @@ export default {
       sourceLabel: '模型来源',
       sourceLocal: 'Ollama',
       sourceRemote: 'API',
+      sourcePlugin: '插件',
+      pluginBaseUrlDesc: '可选，留空时使用插件默认地址。',
       baseUrlLabel: 'Base URL',
       displayNameLabel: '显示名称（可选）',
       displayNamePlaceholder: '例如：客服问答模型',

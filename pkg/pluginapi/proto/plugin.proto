@@ -161,7 +161,7 @@ message ModelChatMessage {
   string tool_call_id = 4;
   repeated ModelChatToolCall tool_calls = 5;
   repeated string images = 6;               // image URLs for the current user message
-  string reasoning_content = 7;
+  string reasoning_content = 7;             // thinking-model reasoning (assistant message)
   repeated ModelChatContentPart multi_content = 8;
 }
 message ModelChatContentPart {
@@ -219,6 +219,10 @@ message ModelStreamResponse {
   string finish_reason = 4;
   ModelTokenUsage usage = 5;
   string error = 6;
+  // reasoning_content carries thinking-model reasoning (OpenAI o1, DeepSeek
+  // reasoner, MiMo, etc.) so streaming responses preserve the same content as
+  // the unary Chat path.
+  string reasoning_content = 7;
 }
 
 message ModelEmbedRequest {

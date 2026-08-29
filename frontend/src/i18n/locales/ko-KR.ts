@@ -2286,6 +2286,8 @@ export default {
       sourceLabel: '모델 소스',
       sourceLocal: 'Ollama',
       sourceRemote: 'API',
+      sourcePlugin: '플러그인',
+      pluginBaseUrlDesc: '선택 사항. 비워두면 플러그인 기본값을 사용합니다.',
       baseUrlLabel: 'Base URL',
       displayNameLabel: '표시 이름 (선택)',
       displayNamePlaceholder: '예: 고객지원 QA 모델',
