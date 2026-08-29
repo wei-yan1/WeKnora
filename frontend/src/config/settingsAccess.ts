@@ -19,6 +19,7 @@ export const SETTINGS_SECTION_MIN_ROLE: Record<string, SettingsRoleKey> = {
   storage: 'admin',
   sandbox: 'admin',
   mcp: 'admin',
+  plugins: 'admin',
   system: 'viewer',
   userprofile: 'viewer',
   tenant: 'viewer',

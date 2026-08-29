@@ -31,7 +31,13 @@
           :aria-label="entity.provider"
         >
           <img
-            v-if="resolveLogo(entity.provider)?.mode === 'color'"
+            v-if="providerIcon(entity.provider)"
+            :src="providerIcon(entity.provider)"
+            :alt="entity.provider"
+            class="provider-card__badge-img"
+          />
+          <img
+            v-else-if="resolveLogo(entity.provider)?.mode === 'color'"
             :src="resolveLogo(entity.provider)!.url"
             :alt="entity.provider"
             class="provider-card__badge-img"
@@ -102,7 +108,13 @@
       -->
       <template v-if="selectedProviderType" #headerIcon>
         <img
-          v-if="drawerLogo?.mode === 'color'"
+          v-if="selectedProviderType.icon"
+          :src="selectedProviderType.icon"
+          :alt="selectedProviderType.id"
+          class="header-icon__img"
+        />
+        <img
+          v-else-if="drawerLogo?.mode === 'color'"
           :src="drawerLogo.url"
           :alt="selectedProviderType.id"
           class="header-icon__img"
@@ -273,6 +285,33 @@
                 :label="configFieldText(option.label_key, option.label)"
               />
             </t-select>
+            <t-input
+              v-else-if="field.type === 'secret'"
+              v-model="providerForm.parameters.extra_config[field.key]"
+              type="password"
+              :placeholder="field.description"
+            >
+              <template #prefix-icon><t-icon name="lock-on" /></template>
+            </t-input>
+            <t-input-number
+              v-else-if="field.type === 'number'"
+              v-model="providerForm.parameters.extra_config[field.key]"
+              :placeholder="field.description"
+            />
+            <div v-else-if="field.type === 'boolean'" class="vision-toggle">
+              <t-switch v-model="providerForm.parameters.extra_config[field.key]" />
+            </div>
+            <t-input
+              v-else-if="field.type === 'array'"
+              :value="arrayConfigText(field.key)"
+              :placeholder="field.description"
+              @change="(value: any) => updateArrayConfig(field.key, String(value ?? ''))"
+            />
+            <t-input
+              v-else
+              v-model="providerForm.parameters.extra_config[field.key]"
+              :placeholder="field.description"
+            />
             <p v-if="field.description" class="form-desc">
               {{ configFieldText(field.description_key, field.description) }}
             </p>
@@ -324,6 +363,7 @@ import {
   deleteWebSearchProviderCredentialField,
   type WebSearchProviderEntity,
   type WebSearchProviderTypeInfo,
+  type WebSearchProviderConfigField,
   type WebSearchCredentialField,
 } from '@/api/web-search-provider'
 import SettingDrawer from '@/components/settings/SettingDrawer.vue'
@@ -363,7 +403,7 @@ const providerForm = ref<{
     engine_id?: string
     base_url?: string
     proxy_url?: string
-    extra_config: Record<string, string>
+    extra_config: Record<string, any>
   }
   is_default: boolean
 }>({
@@ -456,7 +496,7 @@ const canTestConnection = computed(() => {
   if (pt.requires_api_key && !providerForm.value.parameters.api_key) return false
   if (pt.requires_engine_id && !providerForm.value.parameters.engine_id) return false
   if (pt.requires_base_url && !providerForm.value.parameters.base_url) return false
-  if (pt.config_fields?.some(field => field.required && !providerForm.value.parameters.extra_config?.[field.key])) return false
+  if (pt.config_fields?.some(field => field.required && isConfigFieldValueEmpty(field, providerForm.value.parameters.extra_config?.[field.key]))) return false
   return true
 })
 
@@ -469,8 +509,13 @@ const providerInitial = (providerId: string) => {
 // 见 VectorStoreSettings 的同名注释：返回 --logo-url 给 ::before 用 mask 渲染。
 const resolveLogo = (providerId: string) => providerLogo('websearch', providerId)
 
+// 后端元数据里的 icon URL（外部插件通过 metadata.icon 声明，宿主流式提供）。
+const providerIcon = (providerId: string): string | undefined => {
+  return providerTypes.value.find(p => p.id === providerId)?.icon
+}
+
 const badgeClass = (providerId: string) => {
-  const m = resolveLogo(providerId)?.mode
+  const m = providerIcon(providerId) ? 'color' : resolveLogo(providerId)?.mode
   return {
     'provider-card__badge--logo': !!m,
     'provider-card__badge--color': m === 'color',
@@ -479,6 +524,9 @@ const badgeClass = (providerId: string) => {
 }
 
 const badgeStyle = (providerId: string): Record<string, string> => {
+  if (providerIcon(providerId)) {
+    return { background: 'var(--td-bg-color-container, #fff)' }
+  }
   const logo = resolveLogo(providerId)
   return logo?.mode === 'mono' ? { '--logo-url': `url("${logo.url}")` } : {}
 }
@@ -496,8 +544,48 @@ const providerConfigDefaults = (providerId: string) => {
   return Object.fromEntries(
     fields
       .filter(field => field.default !== undefined)
-      .map(field => [field.key, field.default as string]),
+      .map(field => [field.key, deserializeConfigValue(field, field.default)]),
   )
+}
+
+// Schema-backed fields can be boolean/number — plain falsy checks would
+// wrongly flag false and 0 as "not filled". Only string/array emptiness blocks.
+const isConfigFieldValueEmpty = (field: WebSearchProviderConfigField, value: unknown): boolean => {
+  if (field.type === 'boolean') return false
+  if (field.type === 'number') return value === undefined || value === null || value === '' || Number.isNaN(Number(value))
+  if (field.type === 'array') return Array.isArray(value) ? value.length === 0 : String(value ?? '').trim() === ''
+  return value === undefined || value === null || String(value).trim() === ''
+}
+
+// ExtraConfig persists as map[string]string on the backend, but the form binds
+// typed values (boolean/number) at runtime — serialize on save, parse on load.
+const deserializeConfigValue = (field: WebSearchProviderConfigField | undefined, raw: unknown): any => {
+  if (raw === undefined || raw === null) return ''
+  if (!field) return raw
+  if (field.type === 'boolean') return raw === true || raw === 'true'
+  if (field.type === 'number') {
+    const parsed = Number(raw)
+    return Number.isNaN(parsed) ? raw : parsed
+  }
+  return raw
+}
+
+const deserializeExtraConfig = (providerId: string, config: Record<string, any> | undefined): Record<string, any> => {
+  const fields = providerTypes.value.find(p => p.id === providerId)?.config_fields || []
+  const out: Record<string, any> = {}
+  for (const [key, value] of Object.entries(config || {})) {
+    out[key] = deserializeConfigValue(fields.find(f => f.key === key), value)
+  }
+  return out
+}
+
+// Array fields edit as comma-separated text (same convention as datasource).
+const arrayConfigText = (key: string): string => {
+  const value = providerForm.value.parameters.extra_config?.[key]
+  return Array.isArray(value) ? value.join(', ') : String(value ?? '')
+}
+const updateArrayConfig = (key: string, text: string) => {
+  providerForm.value.parameters.extra_config[key] = text.split(',').map((item: string) => item.trim()).filter(Boolean)
 }
 
 // ===== Methods =====
@@ -555,10 +643,10 @@ const editProvider = (entity: WebSearchProviderEntity) => {
       engine_id: entity.parameters?.engine_id || '',
       base_url: entity.parameters?.base_url || '',
       proxy_url: entity.parameters?.proxy_url || '',
-      extra_config: {
+      extra_config: deserializeExtraConfig(entity.provider, {
         ...providerConfigDefaults(entity.provider),
         ...(entity.parameters?.extra_config || {}),
-      },
+      }),
     },
     is_default: entity.is_default || false,
   }
@@ -586,7 +674,8 @@ const saveProvider = async () => {
     }
     const extraConfig = Object.fromEntries(
       Object.entries(providerForm.value.parameters.extra_config || {})
-        .filter(([, value]) => value !== ''),
+        .filter(([, value]) => value !== '' && value !== undefined && value !== null)
+        .map(([key, value]) => [key, String(value)]),
     )
     if (Object.keys(extraConfig).length > 0) {
       paramsOut.extra_config = extraConfig
@@ -897,6 +986,10 @@ onMounted(async () => {
   background: rgba(98, 53, 187, 0.12);
   color: #6235BB;
 }
+.provider-card--TARily .provider-card__badge {
+  background: rgba(98, 53, 187, 0.12);
+  color: #6235BB;
+}
 .provider-card--baidu .provider-card__badge {
   // 百度官方主色（搜索框 du 标识那个蓝），#2932E1。低饱和版用 12% alpha
   // 浅底，跟其他 provider 一致。之前误填红色（混淆了百度地图等子产品）。
@@ -1178,6 +1271,10 @@ onMounted(async () => {
   color: #4285F4;
 }
 .websearch-drawer--tavily .setting-drawer__header-icon {
+  background: rgba(98, 53, 187, 0.12);
+  color: #6235BB;
+}
+.websearch-drawer--TARily .setting-drawer__header-icon {
   background: rgba(98, 53, 187, 0.12);
   color: #6235BB;
 }

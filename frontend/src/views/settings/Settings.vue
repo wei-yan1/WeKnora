@@ -192,6 +192,11 @@
                   <div v-if="currentSection === 'mcp'" class="section">
                     <McpSettings />
                   </div>
+
+                  <!-- 插件服务 -->
+                  <div v-if="currentSection === 'plugins'" class="section">
+                    <PluginServiceSettings />
+                  </div>
                 </template>
               </div>
             </div>
@@ -217,6 +222,7 @@ import GeneralSettings from './GeneralSettings.vue'
 import ModelSettings from './ModelSettings.vue'
 import OllamaSettings from './OllamaSettings.vue'
 import McpSettings from './McpSettings.vue'
+import PluginServiceSettings from './PluginServiceSettings.vue'
 import WebSearchSettings from './WebSearchSettings.vue'
 import ChatHistorySettings from './ChatHistorySettings.vue'
 import MemorySettings from './MemorySettings.vue'
@@ -364,6 +370,7 @@ const navItems = computed(() => {
     { key: 'storage', icon: 'cloud', label: t('settings.storageEngine') },
     { key: 'sandbox', icon: 'server', label: t('settings.sandbox.title') },
     { key: 'mcp', icon: 'tools', label: t('settings.mcpService') },
+    { key: 'plugins', icon: 'plugin', label: t('settings.pluginService') },
     { key: 'system', icon: 'info-circle', label: t('settings.versionInfo') },
     { key: 'system-global', icon: 'server', label: t('settings.system') },
     { key: 'runtime-queues', icon: 'queue', label: t('settings.taskQueue') },
@@ -428,6 +435,7 @@ const navGroups = computed<NavGroup[]>(() => {
         'sandbox',
         'websearch',
         'mcp',
+        'plugins',
       ]),
     },
     {

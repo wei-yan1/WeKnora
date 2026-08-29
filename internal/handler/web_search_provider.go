@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/handler/dto"
@@ -328,6 +331,53 @@ func (h *WebSearchProviderHandler) ListProviderTypes(c *gin.Context) {
 		"success": true,
 		"data":    providerTypes,
 	})
+}
+
+// webSearchProviderIconContentTypes maps allowed icon extensions to MIME types.
+var webSearchProviderIconContentTypes = map[string]string{
+	".png":  "image/png",
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".svg":  "image/svg+xml",
+	".webp": "image/webp",
+	".gif":  "image/gif",
+	".ico":  "image/x-icon",
+}
+
+// maxWebSearchProviderIconBytes bounds the size of a served plugin icon.
+const maxWebSearchProviderIconBytes = 512 * 1024
+
+// GetProviderIcon streams a plugin-bundled provider icon. The provider type is
+// looked up in the registry's icon-file map, so only icons registered by a
+// loaded external plugin are served — never arbitrary files.
+func (h *WebSearchProviderHandler) GetProviderIcon(c *gin.Context) {
+	providerType := c.Param("type")
+	if h.registry == nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	iconFile := h.registry.ResolveIconFile(providerType)
+	if iconFile == "" {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	ext := strings.ToLower(filepath.Ext(iconFile))
+	contentType, ok := webSearchProviderIconContentTypes[ext]
+	if !ok {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	info, err := os.Stat(iconFile)
+	if err != nil || info.IsDir() || info.Size() > maxWebSearchProviderIconBytes {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	data, err := os.ReadFile(iconFile)
+	if err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	c.Data(http.StatusOK, contentType, data)
 }
 
 // TestProviderByID tests an existing saved provider by performing a sample search.

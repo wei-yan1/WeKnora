@@ -205,6 +205,8 @@ func RegisterWebSearchProviderRoutes(
 	{
 		// List available provider types (metadata for UI forms) — Viewer+
 		providers.GET("/types", g.Viewer(), h.ListProviderTypes)
+		// Stream a plugin-bundled provider icon — Viewer+
+		providers.GET("/icon/:type", g.Viewer(), h.GetProviderIcon)
 		// Test with raw credentials (no persistence) — Admin+
 		providers.POST("/test", g.Admin(), h.TestProviderRaw)
 		// CRUD
@@ -218,6 +220,15 @@ func RegisterWebSearchProviderRoutes(
 		providers.DELETE("/:id/credentials/:field", g.Admin(), credHandler.DeleteField)
 		// Test existing saved provider — Admin+
 		providers.POST("/:id/test", g.Admin(), h.TestProviderByID)
+	}
+}
+
+// RegisterPluginRoutes registers plugin control-plane management routes.
+func RegisterPluginRoutes(r *gin.RouterGroup, h *handler.PluginHandler, g *rbacGuards) {
+	plugins := g.apiKeyGroup(r.Group("/plugins"), apiKeyFullAccess())
+	{
+		// Rescan plugin directories and incrementally load new plugins — Admin+
+		plugins.POST("/rescan", g.Admin(), h.Rescan)
 	}
 }
 

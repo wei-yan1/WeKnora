@@ -69,6 +69,7 @@ func registerExternalDataSource(manager *Manager, registry *datasource.Connector
 			GenerationValid:   func(value uint64) bool { return manager.GenerationValid(manifest.ID, value) },
 		}}, nil
 	}); err != nil {
+		_ = manager.Unregister(context.Background(), manifest.ID)
 		return "", err
 	}
 	// Derive connector metadata from the manifest so the external plugin
@@ -78,7 +79,7 @@ func registerExternalDataSource(manager *Manager, registry *datasource.Connector
 	datasource.RegisterExternalConnectorMetadata(meta)
 	// A local (relative) icon is served by the host from the plugin directory;
 	// record its absolute path so the icon endpoint can stream it.
-	if iconFile, ok := resolveLocalIconFile(sourceDir, meta.Icon); ok {
+	if iconFile, ok := resolveLocalIconFile(sourceDir, manifestIconValue(manifest)); ok {
 		datasource.RegisterExternalConnectorIconFile(connectorType, iconFile)
 	}
 	return connectorType, nil

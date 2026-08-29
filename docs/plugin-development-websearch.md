@@ -97,8 +97,9 @@ func (mySearch) Search(ctx context.Context, req pluginapi.WebSearchRequest) (plu
 
 func main() {
     handler := pluginapi.WebSearchHandler{
-        PluginID: "example.mysearch",
-        OnSearch: (mySearch{}).Search,
+        PluginID:     "example.mysearch",
+        Capabilities: []string{"search"},   // 必须与 plugin.yaml 的 capabilities 一致
+        OnSearch:     (mySearch{}).Search,
     }
     addr := os.Getenv("WEKNORA_PLUGIN_ADDR")
     if err := pluginapi.ServeWebSearch(context.Background(), addr, handler); err != nil {
@@ -110,8 +111,10 @@ func main() {
 要点：
 
 - `WebSearchHandler.PluginID` 必须与 `plugin.yaml` 的 `id` 一致。
+- `WebSearchHandler.Capabilities` 必须与 `plugin.yaml` 的 `capabilities` **逐项一致**——宿主握手时会做双向严格校验：manifest 声明了但 runtime 未回显、或 runtime 回显了 manifest 未声明，都会导致装载失败。本文示例统一用 `"search"`（与模板 `template-web-search` 一致）。
 - `OnSearch` 为 nil 时返回 `Error: "web search handler is not implemented"`。
 - `Handshake` / `Health` 由 `WebSearchHandler` 自动实现。
+- 出站请求请用 `pluginapi.NewPluginHTTPClient()`（读取宿主注入的网络策略），不要用裸 `http.Client` / `http.DefaultClient`——否则 `permissions.network` 白名单不生效，等于绕过了框架的安全模型。
 
 ## 5. `plugin.yaml` 示例
 
@@ -126,10 +129,12 @@ weknora_version: ">=0.7 <1.0"
 entrypoint: ./mysearch
 
 capabilities:
-  - web_search
+  - search              # 与 handler 的 Capabilities 一致（值是任意字符串，示例统一用 search）
 
 metadata:
   provider_type: mysearch           # 供宿主注册与路由的 provider 类型名
+  icon: logo.png                    # 可选：插件图标（相对插件目录的文件名，或 http(s) URL）
+  docs_url: https://example.com     # 可选：官方文档链接，前端渲染"查看文档"入口
 
 config:
   - key: api_key
@@ -140,6 +145,10 @@ config:
   - key: base_url
     type: string
     description: 搜索服务地址
+    required: true                  # 注意：required:false 时前端不会显示该输入框
+  - key: proxy_url
+    type: string
+    description: HTTP 代理地址
     required: false
 
 permissions:
@@ -148,6 +157,66 @@ permissions:
     - "api.example.com"
     - "*.example.com"
 ```
+
+### config 字段 key 名的硬约定（影响前端表单）
+
+宿主通过 config 字段的 **key 名**来识别 provider 管理界面里的元数据，以下四个 key 名是**硬约定**，必须恰好同名：
+
+| key 名 | 宿主识别结果 |
+|---|---|
+| `api_key` | `RequiresAPIKey` —— 前端渲染"需要 API Key"标识 |
+| `engine_id` | `RequiresEngineID` —— 前端渲染"需要 Engine ID"标识 |
+| `base_url` | `RequiresBaseURL` —— 前端渲染"需要 Base URL"标识 |
+| `proxy_url` | `SupportsProxy` —— 前端渲染"支持代理"标识 |
+
+不要改名（如 `apikey`、`key`、`token`）——改名后宿主不会把这些字段识别为对应能力，前端表单与参数校验都会失效。
+
+这四个保留 key 的行为语义：
+
+- 它们**只驱动能力标志与宿主内置的专用表单区**（API 密钥框、Base URL 框、HTTP 代理框），**不会**作为自定义字段再渲染一遍输入框。
+- `required` 决定对应输入框**是否出现**：`required: true` 显示（且必填），`required: false` **完全不显示**——框架没有"可选显示"的中间态。需要一个"可留空"的 Base URL 时，请声明 `required: true` 并让用户填默认地址。
+- 其他自定义 key 也会透传给插件，但要获得**可输入的控件**请使用 `config_schema`（见下节）；`config` 列表里的 `type` 声明不会产生额外的输入控件。
+
+### 扩展参数：config_schema（推荐）
+
+`config` 列表只负责四个保留 key 的能力声明。插件的**自定义参数**（搜索深度、返回条数、语言等）请用 `config_schema` 声明——宿主会把它转换成前端可渲染的字段列表，参数值经请求的 `ExtraConfig` 透传给插件。
+
+写法（平铺 properties，key 即参数名）：
+
+```yaml
+config_schema:
+  type: object
+  properties:
+    search_depth:
+      type: string
+      title: Search Depth             # 表单 label
+      description: basic 或 advanced  # 输入提示与说明文字
+      enum: [basic, advanced]         # 有 enum 时渲染为下拉框
+      default: basic
+    page_size:
+      type: integer                   # 渲染为数字输入框
+      title: Page Size
+      default: 5
+    safe_mode:
+      type: boolean                   # 渲染为开关
+      title: Safe Mode
+```
+
+字段属性与控件映射：
+
+| 声明 | 前端控件 |
+|---|---|
+| 有 `enum` | 下拉框（options 取自 enum） |
+| `type: string` | 文本输入框（`secret: true` 时为密码框） |
+| `type: integer` / `number` | 数字输入框 |
+| `type: boolean` | 开关 |
+| `type: array` / `string[]` | 逗号分隔文本输入 |
+
+约定与边界：
+
+- **值统一为字符串**：无论声明什么类型，参数值都以字符串存入 `ExtraConfig`（`"5"`、`"true"`），插件侧自行解析。
+- **扩展字段明文存储**：`extra_config` 不做加密/脱敏。**敏感凭证一律用保留 key `api_key`**（走加密与 `/credentials` 子资源），不要在 schema 里声明 secret 类凭证字段。
+- 同时写了 `config` 和 `config_schema` 时：`config` 负责保留 key 能力声明，`config_schema` 负责扩展字段渲染；只有 `config` 时，扩展字段按 label = description 简化渲染（推荐直接写 schema）。
 
 ### 网络策略（联网插件必读）
 
@@ -158,6 +227,8 @@ Web Search 插件需要出站联网，所以 `permissions.network` 不能是 `no
 
 白名单匹配按**域名（host）+ 通配**，不是字符串前缀匹配——写 `api.example.com` 不会误放行 `api.example.com.evil.com`。
 
+**反 SSRF 边界（重要）**：出站守卫会拦截内网/私有地址（`isForbiddenIP` 含 `IsPrivate()`）——即使 `allowed_destinations` 显式写入了内网 host，连接仍会被拒绝。因此**对接内网搜索服务的插件目前无法出站**，需先在宿主侧调整网络守卫。此外，请求里的 `BaseURL` 覆盖目标同样受 allowlist 约束：指向白名单外的域名会被拦截。
+
 ## 6. 校验与验证
 
 SDK 提供 conformance 测试入口 `RunWebSearchConformance`，可对插件做协议级自检：
@@ -167,6 +238,8 @@ SDK 提供 conformance 测试入口 `RunWebSearchConformance`，可对插件做�
 - 错误查询显式报错。
 
 建议：本地起 server → 跑 conformance → 通过后再放入 `WEKNORA_PLUGIN_DIR_SEARCH` 指向的目录交给宿主装载。
+
+没有真实 API Key 时，conformance 的 Search 用例无法通过（会真实出网）。此时的最小验证路径：起进程 → Handshake 回报 `extension_type=search` → Health 返回非空 state——这两项不依赖任何凭证；Search 的端到端留给拿到 Key 后的真机联调（宿主「设置 → 插件服务 → 刷新插件」装载后，在搜索设置里点「测试连接」）。
 
 ## 7. 宿主侧如何被使用
 

@@ -185,6 +185,33 @@ permissions:
 
 > 对你的意义：插件进程重启后，宿主会自动恢复调用，**插件作者无需做任何特殊处理**；但也意味着插件实现应当是**无状态或能承受重启**的（重启期间的请求会失败一次并走宿主重试）。
 
+### 6.1 模型实例上下文（ModelContext）：一个进程服务多个模型
+
+一个插件进程通常会服务**同一个 provider 下的多个模型实例**——例如一个「OpenAI 兼容」插件（`base_url` + `api_key` 只有一份），用户却在 WeKnora 里同时配置了 `gpt-4o`（chat）、`text-embedding-3-large`（embedding）、`text-embedding-3-small`（embedding）。这些实例共享同一份插件级配置，但 **model_id 各不相同**，插件必须能区分「这次调用是给哪个模型实例」。
+
+为此，宿主在每次调用时通过 gRPC metadata 注入模型身份（与 `InvocationContext` 同一种机制，不修改 v1 protobuf）：
+
+| 字段 | 含义 |
+|---|---|
+| `ModelID` | 宿主库中该模型记录的**唯一 ID**（全局稳定，可用作日志/审计/计费的分组键） |
+| `ModelName` | 模型名（如 `gpt-4o`、`text-embedding-3-large`） |
+
+插件侧读取方式分两类：
+
+- **`Chat` / `ChatStream`**：SDK 已自动读取并填入 `ChatRequest.ModelID` / `ChatRequest.ModelName`，直接使用即可。
+- **`Embed` / `Rerank` / `PredictVLM` / `Transcribe`**：这些回调签名里没有 model 参数，需要插件自己调用 `pluginapi.ModelContextFromContext(ctx)` 读取：
+
+```go
+func (myModel) Embed(ctx context.Context, text string) ([]float32, error) {
+    mc := pluginapi.ModelContextFromContext(ctx)
+    // mc.ModelID / mc.ModelName —— 例如按 ModelName 路由到不同的底层模型
+    _ = mc
+    return embedWith(ctx, mc.ModelName, text)
+}
+```
+
+> **边界**：`ModelContext` 只传模型身份（id/name），**不传 `base_url` / `api_key`**——那两者是插件级 `config`（见第 5 节），由插件自己在进程内维护。因此 v1 的「一个进程多实例」是「共享同一 `base_url` + `api_key`、`model_id` 不同」的场景（即同一厂商的多模型）；「不同租户各自持有不同 key」这类更细粒度隔离不在 v1 范围内。
+
 ## 7. 校验与验证
 
 SDK 提供 `RunModelConformance`，可对模型插件做协议级冒烟测试（与 DataSource / Parser / WebSearch 三者对齐）。它依次：

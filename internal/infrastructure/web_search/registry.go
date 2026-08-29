@@ -19,6 +19,7 @@ type ProviderFactory func(params types.WebSearchProviderParameters) (interfaces.
 type Registry struct {
 	factories map[string]ProviderFactory
 	infos     map[string]types.WebSearchProviderTypeInfo
+	iconFiles map[string]string
 	mu        sync.RWMutex
 }
 
@@ -27,6 +28,7 @@ func NewRegistry() *Registry {
 	return &Registry{
 		factories: make(map[string]ProviderFactory),
 		infos:     make(map[string]types.WebSearchProviderTypeInfo),
+		iconFiles: make(map[string]string),
 	}
 }
 
@@ -66,7 +68,29 @@ func (r *Registry) Unregister(id string) bool {
 	}
 	delete(r.factories, id)
 	delete(r.infos, id)
+	delete(r.iconFiles, id)
 	return true
+}
+
+// RegisterIconFile records the absolute path of a plugin-bundled icon for an
+// external provider type. The icon endpoint streams this file; a provider
+// without a local icon (http(s) URL or none) is simply not recorded.
+func (r *Registry) RegisterIconFile(providerType, iconFile string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if iconFile == "" {
+		delete(r.iconFiles, providerType)
+		return
+	}
+	r.iconFiles[providerType] = iconFile
+}
+
+// ResolveIconFile returns the on-disk icon file path for an external provider
+// type, or "" when no local icon is registered.
+func (r *Registry) ResolveIconFile(providerType string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.iconFiles[providerType]
 }
 
 // ListTypeInfos returns metadata registered by external providers. Built-in

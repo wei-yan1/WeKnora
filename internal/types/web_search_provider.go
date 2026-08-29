@@ -129,6 +129,10 @@ type WebSearchProviderTypeInfo struct {
 	ID string `json:"id"`
 	// Human-readable name
 	Name string `json:"name"`
+	// Icon is a URL for the provider logo. External plugins may declare a
+	// plugin-bundled icon via manifest metadata.icon; the host serves local
+	// icon files at /api/v1/web-search-providers/icon/:type.
+	Icon string `json:"icon,omitempty"`
 	// Whether the provider requires an API key
 	RequiresAPIKey bool `json:"requires_api_key"`
 	// Whether the provider accepts an optional API key (keyless by default, but a

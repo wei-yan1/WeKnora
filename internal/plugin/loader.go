@@ -5,11 +5,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 
 	"github.com/Tencent/WeKnora/internal/datasource"
 	infraWebSearch "github.com/Tencent/WeKnora/internal/infrastructure/web_search"
 )
+
+// rescanMu serializes external plugin discovery/loading so a manual rescan
+// cannot race the startup load or a concurrent rescan. It is a blocking lock:
+// a second scan simply queues behind the first and then sees every plugin as
+// already loaded, reporting them as skipped (idempotent).
+var rescanMu sync.Mutex
 
 // LoadExternal discovers packages from independent plugin roots, creates a
 // runtime from the manifest entrypoint, registers it in the lifecycle manager,
@@ -27,49 +35,24 @@ func LoadExternal(ctx context.Context, roots []string, manager *Manager, registr
 // so adding a new extension type requires registering a new adapter rather than
 // adding a switch case here.
 func LoadExternalWithRegistries(ctx context.Context, roots []string, manager *Manager, registry *datasource.ConnectorRegistry, searchRegistry *infraWebSearch.Registry, retrieverRegistry *RetrieverProviderRegistry) error {
+	rescanMu.Lock()
+	defer rescanMu.Unlock()
 	packages, err := DiscoverPackages(roots)
 	if err != nil {
 		return err
 	}
 	adapters := NewExtensionAdapterRegistry(registry, searchRegistry, retrieverRegistry)
 	loaded := make([]loadedAdapter, 0, len(packages))
-	cleanup := func() {
-		for i := len(loaded) - 1; i >= 0; i-- {
-			loaded[i].adapter.Unregister(loaded[i].handle)
-			_ = manager.Unregister(context.Background(), loaded[i].id)
-		}
-	}
 	for _, pkg := range packages {
-		manifest := pkg.Manifest
-		entrypoint := manifest.Entrypoint
-		if entrypoint == "" {
-			cleanup()
-			return fmt.Errorf("plugin %q has no entrypoint", manifest.ID)
-		}
-		var runtime Runtime
-		if strings.HasPrefix(entrypoint, "docker://") {
-			runtime = NewDockerRuntime(manifest, strings.TrimPrefix(entrypoint, "docker://"))
-		} else {
-			if !filepath.IsAbs(entrypoint) {
-				entrypoint = filepath.Join(pkg.Root, entrypoint)
-			}
-			runtime = NewProcessRuntime(manifest, entrypoint)
-		}
-		adapter, ok := adapters.Get(manifest.ExtensionType)
-		if !ok {
-			cleanup()
-			return fmt.Errorf("plugin %q uses extension_type %q, but no adapter is registered for it", manifest.ID, manifest.ExtensionType)
-		}
-		handle, err := adapter.Register(manager, manifest, runtime)
+		item, err := loadOnePackage(ctx, pkg, manager, adapters)
 		if err != nil {
-			cleanup()
+			for i := len(loaded) - 1; i >= 0; i-- {
+				loaded[i].adapter.Unregister(loaded[i].handle)
+				_ = manager.Unregister(context.Background(), loaded[i].id)
+			}
 			return err
 		}
-		loaded = append(loaded, loadedAdapter{id: manifest.ID, adapter: adapter, handle: handle})
-		if err := manager.Start(ctx, manifest.ID); err != nil {
-			cleanup()
-			return err
-		}
+		loaded = append(loaded, item)
 	}
 	return nil
 }
@@ -79,6 +62,52 @@ type loadedAdapter struct {
 	id      string
 	adapter ExtensionAdapter
 	handle  adapterHandle
+}
+
+// loadOnePackage builds a runtime for one discovered package, registers it via
+// its extension adapter, and starts it. On failure it rolls back the plugin's
+// own partial state so a retry starts from a clean slate.
+func loadOnePackage(ctx context.Context, pkg Package, manager *Manager, adapters *ExtensionAdapterRegistry) (loadedAdapter, error) {
+	manifest := pkg.Manifest
+	if manifest.Entrypoint == "" {
+		return loadedAdapter{}, fmt.Errorf("plugin %q has no entrypoint", manifest.ID)
+	}
+	var runtime Runtime
+	if strings.HasPrefix(manifest.Entrypoint, "docker://") {
+		runtime = NewDockerRuntime(manifest, strings.TrimPrefix(manifest.Entrypoint, "docker://"))
+	} else {
+		entrypoint := manifest.Entrypoint
+		if !filepath.IsAbs(entrypoint) {
+			entrypoint = filepath.Join(pkg.Root, entrypoint)
+		}
+		runtime = NewProcessRuntime(manifest, entrypoint)
+	}
+	adapter, ok := adapters.Get(manifest.ExtensionType)
+	if !ok {
+		return loadedAdapter{}, fmt.Errorf("plugin %q uses extension_type %q, but no adapter is registered for it", manifest.ID, manifest.ExtensionType)
+	}
+	handle, err := adapter.Register(manager, manifest, runtime)
+	if err != nil {
+		rollbackLoad(ctx, manager, adapter, handle, manifest)
+		return loadedAdapter{}, err
+	}
+	if err := manager.Start(ctx, manifest.ID); err != nil {
+		rollbackLoad(ctx, manager, adapter, handle, manifest)
+		return loadedAdapter{}, err
+	}
+	return loadedAdapter{id: manifest.ID, adapter: adapter, handle: handle}, nil
+}
+
+// rollbackLoad unwinds a partially loaded plugin. adapter.Unregister is
+// idempotent; manager.Unregister only runs while the entry still exists because
+// its Stop step errors on a missing id.
+func rollbackLoad(ctx context.Context, manager *Manager, adapter ExtensionAdapter, handle adapterHandle, manifest Manifest) {
+	if adapter != nil {
+		adapter.Unregister(handle)
+	}
+	if _, ok := manager.Get(manifest.ID); ok {
+		_ = manager.Unregister(ctx, manifest.ID)
+	}
 }
 
 func LoadExternalFromEnv(ctx context.Context, manager *Manager, registry *datasource.ConnectorRegistry) error {
@@ -100,7 +129,9 @@ var pluginDirEnvVars = []struct {
 	{ExtensionRetriever, "WEKNORA_PLUGIN_DIR_RETRIEVER"},
 }
 
-func LoadExternalFromEnvWithRegistries(ctx context.Context, manager *Manager, registry *datasource.ConnectorRegistry, searchRegistry *infraWebSearch.Registry, retrieverRegistry *RetrieverProviderRegistry) error {
+// pluginRootsFromEnv collects the configured plugin directories from the
+// WEKNORA_PLUGIN_DIR_* environment variables.
+func pluginRootsFromEnv() []string {
 	var roots []string
 	for _, entry := range pluginDirEnvVars {
 		value := strings.TrimSpace(os.Getenv(entry.envVar))
@@ -115,8 +146,80 @@ func LoadExternalFromEnvWithRegistries(ctx context.Context, manager *Manager, re
 			}
 		}
 	}
+	return roots
+}
+
+func LoadExternalFromEnvWithRegistries(ctx context.Context, manager *Manager, registry *datasource.ConnectorRegistry, searchRegistry *infraWebSearch.Registry, retrieverRegistry *RetrieverProviderRegistry) error {
+	roots := pluginRootsFromEnv()
 	if len(roots) == 0 {
 		return nil
 	}
 	return LoadExternalWithRegistries(ctx, roots, manager, registry, searchRegistry, retrieverRegistry)
+}
+
+// RescanReport summarizes one incremental plugin rescan pass.
+type RescanReport struct {
+	Added   []string `json:"added"`
+	Skipped []string `json:"skipped"`
+	Changed []string `json:"changed"`
+	Errors  []string `json:"errors,omitempty"`
+}
+
+// RescanExternalFromEnvWithRegistries re-runs discovery over the configured
+// plugin directories and incrementally loads plugins that appeared since the
+// last load. Already-loaded plugins with an unchanged manifest are skipped; a
+// changed manifest is reported in Changed (applying it still requires a
+// restart). A single plugin's failure is isolated and reported without
+// affecting the others.
+func RescanExternalFromEnvWithRegistries(ctx context.Context, manager *Manager, registry *datasource.ConnectorRegistry, searchRegistry *infraWebSearch.Registry, retrieverRegistry *RetrieverProviderRegistry) RescanReport {
+	roots := pluginRootsFromEnv()
+	if len(roots) == 0 {
+		return RescanReport{}
+	}
+	return RescanExternalWithRegistries(ctx, roots, manager, registry, searchRegistry, retrieverRegistry)
+}
+
+// RescanExternalWithRegistries is RescanExternalFromEnvWithRegistries over an
+// explicit set of roots.
+func RescanExternalWithRegistries(ctx context.Context, roots []string, manager *Manager, registry *datasource.ConnectorRegistry, searchRegistry *infraWebSearch.Registry, retrieverRegistry *RetrieverProviderRegistry) RescanReport {
+	rescanMu.Lock()
+	defer rescanMu.Unlock()
+	report := RescanReport{}
+	packages, err := DiscoverPackages(roots)
+	if err != nil {
+		report.Errors = append(report.Errors, err.Error())
+		return report
+	}
+	existing := make(map[string]Manifest, len(packages))
+	for _, info := range manager.List() {
+		if info.Manifest.Entrypoint == "" {
+			continue // built-in plugins are not re-discovered
+		}
+		existing[info.Manifest.ID] = info.Manifest
+	}
+	adapters := NewExtensionAdapterRegistry(registry, searchRegistry, retrieverRegistry)
+	for _, pkg := range packages {
+		manifest := pkg.Manifest
+		if prev, ok := existing[manifest.ID]; ok {
+			if manifestsEqual(prev, manifest) {
+				report.Skipped = append(report.Skipped, manifest.ID)
+			} else {
+				report.Changed = append(report.Changed, manifest.ID)
+			}
+			continue
+		}
+		if _, err := loadOnePackage(ctx, pkg, manager, adapters); err != nil {
+			report.Errors = append(report.Errors, fmt.Sprintf("%s: %v", manifest.ID, err))
+			continue
+		}
+		report.Added = append(report.Added, manifest.ID)
+	}
+	return report
+}
+
+// manifestsEqual compares two manifests ignoring the discovery-populated
+// SourceDir, which is a filesystem detail rather than a semantic field.
+func manifestsEqual(a, b Manifest) bool {
+	a.SourceDir, b.SourceDir = "", ""
+	return reflect.DeepEqual(a, b)
 }
