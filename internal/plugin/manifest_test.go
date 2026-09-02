@@ -9,7 +9,26 @@ import (
 )
 
 func validManifest() Manifest {
-	return Manifest{APIVersion: APIVersionV1, ID: "example.localdir", Name: "Local Directory", Version: "1.0.0", ExtensionType: ExtensionDataSource, ProtocolVersion: ProtocolVersionV1, WeKnoraVersion: ">=1.0 <2.0", Permissions: Permissions{Network: NetworkNone}, Config: []ConfigField{{Key: "root", Type: "string", Required: true}}}
+	return Manifest{
+		APIVersion:      APIVersionV1,
+		ID:              "example.localdir",
+		Name:            "Local Directory",
+		Version:         "1.0.0",
+		ExtensionType:   ExtensionDataSource,
+		ProtocolVersion: ProtocolVersionV1,
+		WeKnoraVersion:  ">=1.0 <2.0",
+		Permissions:     Permissions{Network: NetworkNone},
+		ConfigSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"settings": map[string]any{
+					"type":       "object",
+					"required":   []any{"root"},
+					"properties": map[string]any{"root": map[string]any{"type": "string"}},
+				},
+			},
+		},
+	}
 }
 
 func TestManifestValidate(t *testing.T) {
@@ -51,10 +70,10 @@ func TestLoadManifestAndDiscover(t *testing.T) {
 	dir := filepath.Join(root, "localdir")
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "plugin.yaml"), []byte("api_version: weknora.plugin/v1\nid: example.localdir\nname: Local Directory\nversion: 1.0.0\nextension_type: datasource\nprotocol_version: v1\npermissions:\n  network: none\n  data:\n    tenants: [self]\n    knowledge_bases: [self]\n    data_sources: [self]\n"), 0o644))
-	manifests, err := Discover([]string{root})
+	packages, err := DiscoverPackages([]string{root})
 	require.NoError(t, err)
-	require.Len(t, manifests, 1)
-	require.Equal(t, "example.localdir", manifests[0].ID)
-	require.NotNil(t, manifests[0].Permissions.Data)
-	require.Equal(t, []string{"self"}, manifests[0].Permissions.Data.Tenants)
+	require.Len(t, packages, 1)
+	require.Equal(t, "example.localdir", packages[0].Manifest.ID)
+	require.NotNil(t, packages[0].Manifest.Permissions.Data)
+	require.Equal(t, []string{"self"}, packages[0].Manifest.Permissions.Data.Tenants)
 }

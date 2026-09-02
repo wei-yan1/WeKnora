@@ -48,33 +48,22 @@ type DataPermissions struct {
 	DataSources    []string `json:"data_sources,omitempty" yaml:"data_sources,omitempty"`
 }
 
-type ConfigField struct {
-	Key         string   `json:"key" yaml:"key"`
-	Type        string   `json:"type" yaml:"type"`
-	Description string   `json:"description,omitempty" yaml:"description,omitempty"`
-	Required    bool     `json:"required,omitempty" yaml:"required,omitempty"`
-	Secret      bool     `json:"secret,omitempty" yaml:"secret,omitempty"`
-	Default     any      `json:"default,omitempty" yaml:"default,omitempty"`
-	Enum        []string `json:"enum,omitempty" yaml:"enum,omitempty"`
-}
-
 // Manifest is the stable package contract. Entrypoint is interpreted by the
 // selected runtime (for example a process path or OCI image); lifecycle code
 // never embeds a plugin ID-specific branch.
 type Manifest struct {
-	APIVersion      string        `json:"api_version" yaml:"api_version"`
-	ID              string        `json:"id" yaml:"id"`
-	Name            string        `json:"name" yaml:"name"`
-	Version         string        `json:"version" yaml:"version"`
-	ExtensionType   string        `json:"extension_type" yaml:"extension_type"`
-	ProtocolVersion string        `json:"protocol_version" yaml:"protocol_version"`
-	WeKnoraVersion  string        `json:"weknora_version" yaml:"weknora_version"`
-	Entrypoint      string        `json:"entrypoint,omitempty" yaml:"entrypoint,omitempty"`
-	Config          []ConfigField `json:"config,omitempty" yaml:"config,omitempty"`
-	// ConfigSchema is a JSON-Schema-like object used to validate request
-	// configuration before it crosses the plugin boundary. Config remains
-	// supported for concise manifests and is converted into this schema when
-	// ConfigSchema is omitted.
+	APIVersion      string `json:"api_version" yaml:"api_version"`
+	ID              string `json:"id" yaml:"id"`
+	Name            string `json:"name" yaml:"name"`
+	Version         string `json:"version" yaml:"version"`
+	ExtensionType   string `json:"extension_type" yaml:"extension_type"`
+	ProtocolVersion string `json:"protocol_version" yaml:"protocol_version"`
+	WeKnoraVersion  string `json:"weknora_version" yaml:"weknora_version"`
+	Entrypoint      string `json:"entrypoint,omitempty" yaml:"entrypoint,omitempty"`
+	// ConfigSchema is the single configuration declaration for the plugin: a
+	// JSON-Schema-like object split into sections (settings / credentials, plus
+	// index_config for retriever). It is validated at load time and drives the
+	// dynamic settings UI for external plugins.
 	ConfigSchema map[string]any `json:"config_schema,omitempty" yaml:"config_schema,omitempty"`
 	Permissions  Permissions    `json:"permissions" yaml:"permissions"`
 	Capabilities []string       `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`

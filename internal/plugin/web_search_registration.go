@@ -86,29 +86,20 @@ func webSearchProviderTypeInfo(manifest Manifest, providerType string) types.Web
 			}
 		}
 	}
-	// Capability flags come from the four reserved keys only; they drive the
-	// dedicated host-side form sections (API key box, base URL box, proxy box).
-	for _, field := range manifest.Config {
-		switch strings.TrimSpace(field.Key) {
-		case "api_key":
-			info.RequiresAPIKey = field.Required
-		case "engine_id":
-			info.RequiresEngineID = field.Required
-		case "base_url":
-			info.RequiresBaseURL = field.Required
-		case "proxy_url":
-			info.SupportsProxy = true
-		}
-	}
-	// ConfigFields carry the provider's *additional* parameters. Prefer the
-	// JSON-Schema declaration (full typing: title/description/secret/enum) and
-	// fall back to the legacy config list. Reserved keys never surface as
-	// custom fields — they already render through dedicated form sections.
-	if len(manifest.ConfigSchema) > 0 {
-		info.ConfigFields = configFieldsFromSchema(manifest.ConfigSchema, webSearchReservedKeys)
-	} else {
-		info.ConfigFields = configFieldsFromLegacy(manifest.Config, webSearchReservedKeys)
-	}
+	// Capability flags come from the four reserved keys only. They live in the
+	// partitioned config_schema: api_key under credentials, the rest under
+	// settings.
+	settingsProps, settingsRequired := schemaSection(manifest.ConfigSchema, "settings")
+	credentialsProps, credentialsRequired := schemaSection(manifest.ConfigSchema, "credentials")
+	info.RequiresAPIKey = sectionFieldRequired(credentialsProps, credentialsRequired, "api_key") ||
+		sectionFieldRequired(settingsProps, settingsRequired, "api_key")
+	info.RequiresEngineID = sectionFieldRequired(settingsProps, settingsRequired, "engine_id")
+	info.RequiresBaseURL = sectionFieldRequired(settingsProps, settingsRequired, "base_url")
+	info.SupportsProxy = sectionFieldPresent(settingsProps, "proxy_url")
+	// ConfigFields carry the provider's *additional* parameters, derived from
+	// the config_schema. Reserved keys never surface as custom fields — they
+	// already render through dedicated form sections.
+	info.ConfigFields = configFieldsFromSchema(manifest.ConfigSchema, webSearchReservedKeys)
 	return info
 }
 

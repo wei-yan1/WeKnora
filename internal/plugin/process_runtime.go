@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/datasource"
-	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/pkg/pluginapi"
 	pluginproto "github.com/Tencent/WeKnora/pkg/pluginapi/proto"
 	"google.golang.org/grpc"
@@ -27,6 +26,11 @@ import (
 // ProcessRuntime depends only on the shared control-plane client
 // (pluginapi.PluginControlClient). It never holds type-specific protocol
 // clients, so adding a new extension type requires no change here.
+// maxPluginMsgSize caps the gRPC message size between the host and plugin
+// processes. It matches the docreader's 50MB limit so image-heavy documents
+// survive the unary parser protocol.
+const maxPluginMsgSize = 50 * 1024 * 1024
+
 type ProcessRuntime struct {
 	Manifest Manifest
 	Command  string
@@ -116,7 +120,11 @@ func (r *ProcessRuntime) startOnce(ctx context.Context, address string) error {
 	}
 	connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	conn, err := grpc.DialContext(connectCtx, address, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	conn, err := grpc.DialContext(connectCtx, address,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxPluginMsgSize), grpc.MaxCallSendMsgSize(maxPluginMsgSize)),
+	)
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
@@ -142,7 +150,20 @@ func (r *ProcessRuntime) startOnce(ctx context.Context, address string) error {
 	return nil
 }
 
-func (r *ProcessRuntime) Stop(context.Context) error {
+// processStopGrace bounds how long Stop waits for the plugin process to exit
+// after cancellation and a termination signal, before force-killing it.
+const processStopGrace = 5 * time.Second
+
+// Stop cancels in-flight calls, requests a graceful exit, and force-kills the
+// process only after a bounded grace period: closing the gRPC connection makes
+// the plugin's handlers observe context cancellation (so a well-behaved
+// long-task handler can flush state or cancel remote work), the interrupt
+// signal lets the SDK's graceful-shutdown path run, and the kill fallback
+// guarantees termination for handlers that ignore both.
+func (r *ProcessRuntime) Stop(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	r.mu.Lock()
 	cmd, conn := r.cmd, r.conn
 	r.cmd, r.conn, r.controlClient = nil, nil, nil
@@ -153,11 +174,25 @@ func (r *ProcessRuntime) Stop(context.Context) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
-	if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		return err
+	// A caller-provided deadline wins over the local grace period:
+	// context.WithTimeout keeps whichever expires first.
+	stopCtx, cancel := context.WithTimeout(ctx, processStopGrace)
+	defer cancel()
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	// Best effort: signal delivery is unsupported on some platforms (e.g.
+	// Windows), where the kill fallback below remains the enforcement path.
+	_ = cmd.Process.Signal(os.Interrupt)
+	select {
+	case <-exited:
+		return nil
+	case <-stopCtx.Done():
+		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+		<-exited
+		return nil
 	}
-	_ = cmd.Wait()
-	return nil
 }
 
 func (r *ProcessRuntime) Health(ctx context.Context) HealthStatus {
@@ -194,25 +229,6 @@ func (r *ProcessRuntime) Conn() *grpc.ClientConn {
 
 func (r *ProcessRuntime) clientReadyLocked() bool {
 	return r.controlClient != nil
-}
-
-// ConnectorFactory returns an instance-aware resolver factory. Start the
-// runtime through Manager before registering this factory, or use lazyStart to
-// make a desktop installation self-starting.
-func (r *ProcessRuntime) ConnectorFactory(connectorType string, lazyStart bool) datasource.ConnectorFactory {
-	return func(ctx context.Context, scope datasource.ConnectorScope, config *types.DataSourceConfig) (datasource.ConnectorLease, error) {
-		if lazyStart {
-			if err := r.Start(ctx); err != nil {
-				return nil, err
-			}
-		}
-		conn := r.Conn()
-		if conn == nil {
-			return nil, fmt.Errorf("plugin %q is not running", r.Manifest.ID)
-		}
-		client := pluginapi.NewDataSourcePluginClient(conn)
-		return processConnectorLease{connector: &GRPCConnectorProxy{ConnectorType: connectorType, Client: client}}, nil
-	}
 }
 
 type processConnectorLease struct {

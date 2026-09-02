@@ -70,15 +70,8 @@ func (m Manifest) Validate(hostVersion string) error {
 	if err := validateDataPermissions(m.Permissions.Data); err != nil {
 		return fmt.Errorf("%w: %w", ErrManifestInvalid, err)
 	}
-	seen := make(map[string]struct{}, len(m.Config))
-	for _, field := range m.Config {
-		if strings.TrimSpace(field.Key) == "" || strings.TrimSpace(field.Type) == "" {
-			return fmt.Errorf("%w: config fields require key and type", ErrManifestInvalid)
-		}
-		if _, ok := seen[field.Key]; ok {
-			return fmt.Errorf("%w: duplicate config field %q", ErrManifestInvalid, field.Key)
-		}
-		seen[field.Key] = struct{}{}
+	if err := validateManifestConfigSchema(m.ExtensionType, m.ConfigSchema); err != nil {
+		return err
 	}
 	if m.WeKnoraVersion != "" && hostVersion != "" && !versionRangeMatches(m.WeKnoraVersion, hostVersion) {
 		return fmt.Errorf("%w: host version %q does not satisfy %q", ErrManifestInvalid, hostVersion, m.WeKnoraVersion)

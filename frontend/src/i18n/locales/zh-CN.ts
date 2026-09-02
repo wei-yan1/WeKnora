@@ -5255,7 +5255,13 @@ export default {
       vlmServerUrlHint: '当 Backend 选择 vlm-http-client 或 hybrid-http-client 时需要填写',
       paddleocrVlEndpointPlaceholder: '如 http://your-paddleocr-vl:8080',
       paddleocrVlEndpointHint: '填写 PaddleOCR-VL 完整服务（pipeline）地址，无需 /layout-parsing 后缀',
-      paddleocrVlCloudTokenPlaceholder: 'PaddleOCR-VL 飞桨星河社区 Token'
+      paddleocrVlCloudTokenPlaceholder: 'PaddleOCR-VL 飞桨星河社区 Token',
+      backend: '后端',
+      apiKey: 'API Key',
+      modelVersion: '模型版本',
+      ocr: 'OCR',
+      token: 'Token',
+      model: '模型'
     },
     weknoraCloud: {
       title: 'WeKnora Cloud',

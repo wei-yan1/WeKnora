@@ -8,86 +8,62 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
-// configFieldsFromSchema 把一个扁平 JSON-Schema（properties 按字段名键）解析成
-// 前端可渲染的 config field 列表。reserved 中的 key 会被跳过——它们由宿主专用
-// 表单区渲染，不重复出现（避免 label-only 空壳）。
+// configFieldsFromSchema 把一个分区式 config_schema（settings / credentials）
+// 解析成前端可渲染的 config field 列表。reserved 中的 key 会被跳过——它们由宿主
+// 专用表单区渲染，不重复出现。credentials 区里的字段强制标记为 secret。
 //
-// 字段类型映射（与前端 SchemaFieldInput 约定一致）：
+// 字段类型映射（与前端约定一致）：
 //
-//	string           → text input        (secret:true → password input)
+//	string           → text input        (secret → password input)
 //	boolean          → switch
 //	integer / number → number input
 //	array / string[] → comma-separated text input
 //	enum present     → select（options 由 enum 值派生）
 func configFieldsFromSchema(schema map[string]any, reserved map[string]struct{}) []types.WebSearchProviderConfigField {
-	properties, _ := schema["properties"].(map[string]any)
-	if len(properties) == 0 {
+	if len(schema) == 0 {
 		return nil
 	}
-	requiredSet := map[string]struct{}{}
-	if raw, ok := schema["required"].([]any); ok {
-		for _, item := range raw {
-			if key, ok := item.(string); ok {
-				requiredSet[strings.TrimSpace(key)] = struct{}{}
+	var fields []types.WebSearchProviderConfigField
+	appendSection := func(section string, forceSecret bool) {
+		props, required := schemaSection(schema, section)
+		keys := make([]string, 0, len(props))
+		for key := range props {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if _, isReserved := reserved[key]; isReserved {
+				continue
 			}
+			property, _ := props[key].(map[string]any)
+			if property == nil {
+				continue
+			}
+			title, _ := property["title"].(string)
+			description, _ := property["description"].(string)
+			jsonType, _ := property["type"].(string)
+			secret, _ := property["secret"].(bool)
+			if forceSecret {
+				secret = true
+			}
+			enum, _ := property["enum"].([]any)
+			_, isRequired := required[key]
+			if title == "" {
+				title = description
+			}
+			fields = append(fields, types.WebSearchProviderConfigField{
+				Key:         key,
+				Label:       title,
+				Type:        configFieldType(jsonType, secret, len(enum) > 0),
+				Required:    isRequired,
+				Default:     configFieldDefaultString(property["default"]),
+				Description: description,
+				Options:     configEnumOptions(enum),
+			})
 		}
 	}
-	keys := make([]string, 0, len(properties))
-	for key := range properties {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	fields := make([]types.WebSearchProviderConfigField, 0, len(keys))
-	for _, key := range keys {
-		if _, isReserved := reserved[key]; isReserved {
-			continue
-		}
-		property, _ := properties[key].(map[string]any)
-		if property == nil {
-			continue
-		}
-		title, _ := property["title"].(string)
-		description, _ := property["description"].(string)
-		jsonType, _ := property["type"].(string)
-		secret, _ := property["secret"].(bool)
-		enum, _ := property["enum"].([]any)
-		_, isRequired := requiredSet[key]
-		fields = append(fields, types.WebSearchProviderConfigField{
-			Key:         key,
-			Label:       title,
-			Type:        configFieldType(jsonType, secret, len(enum) > 0),
-			Required:    isRequired,
-			Default:     configFieldDefaultString(property["default"]),
-			Description: description,
-			Options:     configEnumOptions(enum),
-		})
-	}
-	return fields
-}
-
-// configFieldsFromLegacy 把简洁的 config 列表转换成 ConfigFields，跳过 reserved
-// key。Label 回退到 Description，因为 legacy 列表没有单独的 title。
-func configFieldsFromLegacy(config []ConfigField, reserved map[string]struct{}) []types.WebSearchProviderConfigField {
-	fields := make([]types.WebSearchProviderConfigField, 0, len(config))
-	for _, field := range config {
-		key := strings.TrimSpace(field.Key)
-		if _, isReserved := reserved[key]; isReserved {
-			continue
-		}
-		enum := make([]any, len(field.Enum))
-		for i, value := range field.Enum {
-			enum[i] = value
-		}
-		fields = append(fields, types.WebSearchProviderConfigField{
-			Key:         key,
-			Label:       field.Description,
-			Type:        configFieldType(field.Type, field.Secret, len(field.Enum) > 0),
-			Required:    field.Required,
-			Default:     configFieldDefaultString(field.Default),
-			Description: field.Description,
-			Options:     configEnumOptions(enum),
-		})
-	}
+	appendSection("settings", false)
+	appendSection("credentials", true)
 	return fields
 }
 
@@ -128,4 +104,17 @@ func configFieldDefaultString(value any) string {
 		return ""
 	}
 	return fmt.Sprint(value)
+}
+
+// toStringSlice converts a schema enum ([]any of scalars) into a []string for
+// the VectorStore registration UI, which only models string enums.
+func toStringSlice(values []any) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, strings.TrimSpace(fmt.Sprint(value)))
+	}
+	return out
 }

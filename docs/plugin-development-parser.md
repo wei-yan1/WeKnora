@@ -20,7 +20,7 @@ Parser 插件与其他四类一样，遵循同一套发现与生命周期协议�
 | `api_version` | `weknora.plugin/v1` |
 | `extension_type` | `parser` |
 | `protocol_version` | `v1` |
-| `entrypoint` | 必填，可执行文件或命令（见 quickstart） |
+| `entrypoint` | 必填，可执行文件或命令 |
 | 环境变量 | `WEKNORA_PLUGIN_ADDR`（宿主分配的监听地址） |
 
 启动后必须实现两个统一服务：
@@ -74,11 +74,15 @@ rpc Parse(ParserRequest) returns (ParserResponse)
 | `ImageData` | `[]byte` | 图片原始数据 |
 | `IsOriginal` | `bool` | 是否为原始图片 |
 
-关键语义约束（宿主 conformance 会校验）：
+关键语义约束（需插件自觉遵守，宿主不强制校验）：
+
+宿主在下游只认非空 `Error`（源码 `knowledge_process.go`：`result.Error != ""` 即判定解析失败并透出错误），不会自动拦截「未声明类型」「空内容」或「非 Markdown 残留」。因此这三条由插件自己保证：
 
 1. **只认 `metadata.file_types` 声明的类型**：对未声明的类型应返回错误，而不是静默输出错误文本。
 2. **主输出是 Markdown**：`MarkdownContent` 必须是可直接切分、向量化的 Markdown 文本，不能是二进制或富格式残留。
 3. **错误要显式**：解析失败必须返回非空 `Error`（或让 `OnParse` 返回 error），不能返回空文本让宿主误以为「成功解析了空文档」。
+
+> 建议把这三条写成插件的 `main_test.go` 自测，写法见第 6 节。
 
 ## 4. SDK 侧如何实现：`ServeParser`
 
@@ -134,7 +138,7 @@ version: 1.0.0
 extension_type: parser
 protocol_version: v1
 weknora_version: ">=0.7 <1.0"
-entrypoint: ./mypdfparser            # 可执行文件路径，见 quickstart
+entrypoint: ./mypdfparser            # 可执行文件路径
 
 capabilities:
   - parse                            # 能力标识（握手回显用）；支持的文件类型放 metadata.file_types
@@ -145,12 +149,27 @@ metadata:
     - pdf
     - docx
 
-config:                              # 用户/管理员可配置项，宿主据此渲染表单并校验
-  - key: extract_images
-    type: boolean
-    description: 是否提取图片中的文字
-    required: false
-    default: false
+config_schema:                       # 可选；外部 Parser 的设置页会按此生成表单
+  type: object
+  properties:
+    settings:
+      type: object
+      properties:
+        extract_images:
+          type: boolean
+          title: 是否提取图片中的文字
+          default: false
+        timeout:
+          type: integer
+          title: 解析超时时间（秒）
+          default: 60
+    credentials:
+      type: object
+      properties:
+        api_key:
+          type: string
+          title: 服务 API Key
+          secret: true
 
 permissions:
   network: none                      # 解析插件一般无需联网，用 none 最安全
@@ -160,16 +179,47 @@ permissions:
 
 - `metadata.file_types` **不能为空**——`Validate` 明确要求 parser 插件必须声明至少一个文件类型，否则插件无法通过装载校验。
 
+### 关于 `engine_name` 与配置 Schema
+
+- **`metadata.engine_name` 是全局唯一注册键**：不能与内置引擎（`simple`、`builtin`、`anydoc`、`weknoracloud`、`mineru`、`mineru_cloud`、`paddleocr_vl`、`paddleocr_vl_cloud`）或其他插件的 `engine_name` 重名，否则 `RegisterEngine` 会以 `already registered` 拒绝装载。不填 `engine_name` 时回退为插件 `id`（如 `example.mypdfparser`），可用但建议显式声明语义化引擎名。
+- **外部 Parser 使用 `config_schema` 声明配置**：宿主会把 Schema 随引擎元数据返回，Parser 设置页据此动态渲染 `settings` 和 `credentials`。配置按稳定的插件 `id` 保存，多个插件可以使用同名字段而不会冲突。
+- **运行时仍复用 v1 `ParserEngineOverrides`**：宿主仅在调用当前外部 Parser 时，取该插件自己的已保存配置并写入 `ParserRequest.ParserEngineOverrides`。标量会转成字符串（`true`、`60`），数组/对象使用 JSON 字符串；插件应按自身 Schema 解析。每次上传提供的 per-upload overrides 优先级更高，可以覆盖租户保存值。
+- **统一使用 `config_schema`**：旧的简短 `config` 列表已移除，插件只应声明 `config_schema`，用 `settings`、`credentials`（Retriever 额外允许 `index_config`）分区表达配置，字段用 `type`、`title`、`description`、`default`、`enum`、`secret` 描述。`secret` 标记只允许出现在 `credentials` 分区，否则装载校验会拒绝。
+
 ## 6. 校验与验证
 
-SDK 提供 conformance 测试入口 `RunParserConformance`，可对插件做协议级自检：
+SDK 提供 conformance 测试入口 `RunParserConformance`，做协议级**冒烟自检**，当前只覆盖三项：
 
-- 握手回报 `extension_type=parser`；
-- 对声明类型返回正确文本；
-- 对未声明类型显式报错；
-- 空内容 / 损坏内容不静默。
+- 握手回报 `extension_type=parser`、`protocol_version=v1`；
+- 健康检查返回非空 `state`；
+- 一次 `Parse` 调用（请求由调用方自己构造）能成功返回。
 
-建议流程：本地起 server → 跑 conformance → 通过后再放入 `WEKNORA_PLUGIN_DIR_PARSER` 指向的目录交给宿主装载。
+它**不会**自动校验「未声明类型报错」「空内容不静默」等语义约束——SDK 侧拿不到 `plugin.yaml`，不知道插件声明了哪些类型。这三条应写进插件自己的单元测试。以第 4 节的 `myParser` 为例，`main_test.go` 至少覆盖三个断言：
+
+```go
+func TestParseRejectsUndeclaredType(t *testing.T) {
+    _, err := (myParser{}).Parse(context.Background(), pluginapi.ParserRequest{
+        FileContent: []byte("raw"), FileType: "xyz",
+    })
+    if err == nil { t.Fatal("expected error for undeclared file type") }
+}
+
+func TestParseRejectsEmptyContent(t *testing.T) {
+    _, err := (myParser{}).Parse(context.Background(), pluginapi.ParserRequest{
+        FileContent: []byte("  \n"), FileType: "pdf",
+    })
+    if err == nil { t.Fatal("expected error for empty content") }
+}
+
+func TestParseReturnsMarkdown(t *testing.T) {
+    resp, err := (myParser{}).Parse(context.Background(), pluginapi.ParserRequest{
+        FileContent: []byte("# hi"), FileType: "pdf",
+    })
+    if err != nil || resp.MarkdownContent == "" { t.Fatal("expected markdown output") }
+}
+```
+
+建议流程：本地起 server → 跑 conformance → 跑插件单测 → 都通过后再放入 `WEKNORA_PLUGIN_DIR_PARSER` 指向的目录交给宿主装载。
 
 ## 7. 宿主侧如何被使用
 

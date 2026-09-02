@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 
 	"golang.org/x/sync/singleflight"
@@ -230,6 +231,28 @@ func (r *GRPCRetrieverRepository) Support() []types.RetrieverType {
 	return r.support
 }
 
+// Close closes the current store session (if any), releasing the plugin
+// backend's resources (connections, caches). Safe to call multiple times; the
+// engine registry invokes it when a VectorStore is unregistered. After Close,
+// the next operation lazily re-opens a session via ensureSession.
+func (r *GRPCRetrieverRepository) Close(ctx context.Context) error {
+	r.mu.Lock()
+	s := r.sess
+	r.sess = nil
+	r.mu.Unlock()
+	if s == nil {
+		return nil
+	}
+	resp, err := s.client.CloseStore(ctx, &pluginproto.RetrieverCloseStoreRequest{StoreHandle: s.handle})
+	if err != nil {
+		return err
+	}
+	if resp.GetError() != "" {
+		return errors.New(resp.GetError())
+	}
+	return nil
+}
+
 func (r *GRPCRetrieverRepository) Retrieve(ctx context.Context, params types.RetrieveParams) ([]*types.RetrieveResult, error) {
 	s, err := r.ensureSession(ctx)
 	if err != nil {
@@ -265,6 +288,18 @@ func (r *GRPCRetrieverRepository) Retrieve(ctx context.Context, params types.Ret
 	for _, hit := range resp.GetHits() {
 		hits = append(hits, hitToIndexWithScore(hit))
 	}
+	// Sort deterministically: score descending, then ID ascending as a
+	// tiebreaker. RRF fusion upstream derives rank from slice position (see
+	// fuseWithRRF), so the plugin's return order must not leak into the final
+	// ranking. Sorting here makes the contract independent of plugin behavior,
+	// including keyword engines that return no meaningful scores (score == 0
+	// for all hits) — the ID tiebreaker keeps the rank stable.
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].Score != hits[j].Score {
+			return hits[i].Score > hits[j].Score
+		}
+		return hits[i].ID < hits[j].ID
+	})
 	return []*types.RetrieveResult{{
 		RetrieverEngineType: r.engineType,
 		RetrieverType:       rt,

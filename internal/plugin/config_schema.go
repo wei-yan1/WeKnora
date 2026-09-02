@@ -3,57 +3,179 @@ package plugin
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/datasource"
 )
 
-// EffectiveConfigSchema returns the explicit schema, or derives the same
-// contract from the legacy config: []ConfigField declaration.
-func EffectiveConfigSchema(manifest Manifest) map[string]any {
-	if len(manifest.ConfigSchema) > 0 {
-		return manifest.ConfigSchema
+// configSchemaSections lists the sections a plugin config_schema may declare,
+// per extension type. index_config is retriever-only.
+var configSchemaSections = map[string]map[string]bool{
+	ExtensionDataSource: {"settings": true, "credentials": true},
+	ExtensionParser:     {"settings": true, "credentials": true},
+	ExtensionSearch:     {"settings": true, "credentials": true},
+	ExtensionModel:      {"settings": true, "credentials": true},
+	ExtensionRetriever:  {"settings": true, "credentials": true, "index_config": true},
+}
+
+// schemaSection returns the properties map and required-key set for a named
+// section ("settings" / "credentials" / "index_config") of a partitioned
+// config_schema. It returns nil maps when the section is absent.
+func schemaSection(schema map[string]any, section string) (map[string]any, map[string]struct{}) {
+	root, _ := schema["properties"].(map[string]any)
+	sec, _ := root[section].(map[string]any)
+	if sec == nil {
+		return nil, nil
 	}
-	if len(manifest.Config) == 0 {
+	props, _ := sec["properties"].(map[string]any)
+	required := map[string]struct{}{}
+	if raw, ok := sec["required"].([]any); ok {
+		for _, item := range raw {
+			if key, ok := item.(string); ok {
+				required[strings.TrimSpace(key)] = struct{}{}
+			}
+		}
+	}
+	return props, required
+}
+
+// sectionFieldPresent reports whether the field is declared in the section.
+func sectionFieldPresent(props map[string]any, key string) bool {
+	_, ok := props[key]
+	return ok
+}
+
+// sectionFieldRequired reports whether the field is declared and required.
+func sectionFieldRequired(props map[string]any, required map[string]struct{}, key string) bool {
+	if !sectionFieldPresent(props, key) {
+		return false
+	}
+	_, ok := required[key]
+	return ok
+}
+
+// credentialFieldAllowlist restricts which credential fields each extension
+// type may declare. The two extensions whose runtime config lands in a
+// plain-text extra_config bucket (Web Search / Model) must not pretend to
+// support arbitrary custom secrets — only their already-encrypted fixed keys.
+// Parser / DataSource / Retriever keep their own encrypted credential models
+// and are intentionally absent from this map (no field restriction).
+var credentialFieldAllowlist = map[string]map[string]bool{
+	ExtensionSearch: {"api_key": true},
+	ExtensionModel:  {"api_key": true, "app_secret": true},
+}
+
+// validSchemaFieldType reports whether a field type is part of the supported
+// subset. secret is not a type; it is expressed via the secret:true flag.
+func validSchemaFieldType(typ string) bool {
+	switch typ {
+	case "string", "boolean", "integer", "number", "array", "string[]", "object", "directory", "path", "url":
+		return true
+	default:
+		return false
+	}
+}
+
+func sortedKeys(m map[string]bool) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// validateManifestConfigSchema checks the structural rules of a config_schema:
+// strict object shape, the per-extension section allow-list, legal field types,
+// and that secret fields are declared under credentials only.
+func validateManifestConfigSchema(extensionType string, schema map[string]any) error {
+	if len(schema) == 0 {
 		return nil
 	}
-	settingsProperties := make(map[string]any, len(manifest.Config))
-	required := make([]any, 0)
-	for _, field := range manifest.Config {
-		property := map[string]any{"type": field.Type}
-		if field.Description != "" {
-			property["description"] = field.Description
+	if t, _ := schema["type"].(string); t != "object" {
+		return fmt.Errorf("%w: config_schema must be type object", ErrManifestInvalid)
+	}
+	rootProps, ok := schema["properties"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("%w: config_schema requires a properties object", ErrManifestInvalid)
+	}
+	allowed := configSchemaSections[extensionType]
+	if allowed == nil {
+		allowed = map[string]bool{"settings": true, "credentials": true}
+	}
+	for section, raw := range rootProps {
+		if !allowed[section] {
+			return fmt.Errorf("%w: config_schema section %q is not allowed for extension_type %s", ErrManifestInvalid, section, extensionType)
 		}
-		if field.Secret {
-			property["secret"] = true
+		sec, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%w: config_schema section %q must be an object", ErrManifestInvalid, section)
 		}
-		if field.Default != nil {
-			property["default"] = field.Default
+		if err := validateSchemaSection(extensionType, section, sec); err != nil {
+			return err
 		}
-		if len(field.Enum) > 0 {
-			values := make([]any, len(field.Enum))
-			for i := range field.Enum {
-				values[i] = field.Enum[i]
+	}
+	return nil
+}
+
+func validateSchemaSection(extensionType, section string, sec map[string]any) error {
+	if t, _ := sec["type"].(string); t != "object" {
+		return fmt.Errorf("%w: config_schema section %q must be type object", ErrManifestInvalid, section)
+	}
+	if raw, present := sec["required"]; present {
+		list, ok := raw.([]any)
+		if !ok {
+			return fmt.Errorf("%w: config_schema section %q required must be an array of strings", ErrManifestInvalid, section)
+		}
+		for _, item := range list {
+			if _, ok := item.(string); !ok {
+				return fmt.Errorf("%w: config_schema section %q required must be an array of strings", ErrManifestInvalid, section)
 			}
-			property["enum"] = values
-		}
-		settingsProperties[field.Key] = property
-		if field.Required {
-			required = append(required, field.Key)
 		}
 	}
-	// DataSourceConfig has a stable outer envelope. Connector-specific fields
-	// live under settings, while credentials remain a separate secret map.
-	schema := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"settings": map[string]any{"type": "object", "properties": settingsProperties},
-		},
+	secProps, _ := sec["properties"].(map[string]any)
+	if _, present := sec["properties"]; present && secProps == nil {
+		return fmt.Errorf("%w: config_schema section %q properties must be an object", ErrManifestInvalid, section)
 	}
-	if len(required) > 0 {
-		schema["properties"].(map[string]any)["settings"].(map[string]any)["required"] = required
+	for key, rawProp := range secProps {
+		prop, ok := rawProp.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%w: config_schema field %q must be an object", ErrManifestInvalid, key)
+		}
+		if err := validateSchemaField(extensionType, section, key, prop); err != nil {
+			return err
+		}
 	}
-	return schema
+	return nil
+}
+
+func validateSchemaField(extensionType, section, key string, prop map[string]any) error {
+	typ, _ := prop["type"].(string)
+	if typ == "" {
+		return fmt.Errorf("%w: config_schema field %q requires a type", ErrManifestInvalid, key)
+	}
+	if typ == "secret" {
+		return fmt.Errorf("%w: config_schema field %q should use secret: true instead of type secret", ErrManifestInvalid, key)
+	}
+	if !validSchemaFieldType(typ) {
+		return fmt.Errorf("%w: config_schema field %q has unsupported type %q", ErrManifestInvalid, key, typ)
+	}
+	secret, _ := prop["secret"].(bool)
+	if secret {
+		if section != "credentials" {
+			return fmt.Errorf("%w: secret field %q must be declared under credentials", ErrManifestInvalid, key)
+		}
+		if allowlist, restricted := credentialFieldAllowlist[extensionType]; restricted && !allowlist[key] {
+			return fmt.Errorf("%w: extension_type %s only supports credentials %v (got %q)", ErrManifestInvalid, extensionType, sortedKeys(allowlist), key)
+		}
+	}
+	if raw, present := prop["enum"]; present {
+		if _, ok := raw.([]any); !ok {
+			return fmt.Errorf("%w: config_schema field %q enum must be an array", ErrManifestInvalid, key)
+		}
+	}
+	return nil
 }
 
 // ValidateConfigSchema validates the small, portable subset of JSON Schema

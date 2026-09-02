@@ -350,10 +350,6 @@ func (p *GRPCConnectorProxy) call(ctx context.Context, method string, config *ty
 	return response, nil
 }
 
-func makeRequest(config *types.DataSourceConfig, cursor *types.SyncCursor) (pluginapi.Request, error) {
-	return makeRequestWithSchema(config, cursor, nil)
-}
-
 func makeRequestWithSchema(config *types.DataSourceConfig, cursor *types.SyncCursor, schema map[string]any) (pluginapi.Request, error) {
 	data, err := json.Marshal(config)
 	if err != nil {

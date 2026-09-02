@@ -333,8 +333,9 @@ func (h *WebSearchProviderHandler) ListProviderTypes(c *gin.Context) {
 	})
 }
 
-// webSearchProviderIconContentTypes maps allowed icon extensions to MIME types.
-var webSearchProviderIconContentTypes = map[string]string{
+// pluginIconContentTypes maps allowed icon extensions to MIME types. Shared by
+// every extension point that streams plugin-bundled icons (web search, retriever).
+var pluginIconContentTypes = map[string]string{
 	".png":  "image/png",
 	".jpg":  "image/jpeg",
 	".jpeg": "image/jpeg",
@@ -344,8 +345,8 @@ var webSearchProviderIconContentTypes = map[string]string{
 	".ico":  "image/x-icon",
 }
 
-// maxWebSearchProviderIconBytes bounds the size of a served plugin icon.
-const maxWebSearchProviderIconBytes = 512 * 1024
+// maxPluginIconBytes bounds the size of a served plugin icon.
+const maxPluginIconBytes = 512 * 1024
 
 // GetProviderIcon streams a plugin-bundled provider icon. The provider type is
 // looked up in the registry's icon-file map, so only icons registered by a
@@ -362,13 +363,13 @@ func (h *WebSearchProviderHandler) GetProviderIcon(c *gin.Context) {
 		return
 	}
 	ext := strings.ToLower(filepath.Ext(iconFile))
-	contentType, ok := webSearchProviderIconContentTypes[ext]
+	contentType, ok := pluginIconContentTypes[ext]
 	if !ok {
 		c.Status(http.StatusNotFound)
 		return
 	}
 	info, err := os.Stat(iconFile)
-	if err != nil || info.IsDir() || info.Size() > maxWebSearchProviderIconBytes {
+	if err != nil || info.IsDir() || info.Size() > maxPluginIconBytes {
 		c.Status(http.StatusNotFound)
 		return
 	}

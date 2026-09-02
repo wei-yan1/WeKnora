@@ -14,21 +14,6 @@ type Package struct {
 	Manifest     Manifest
 }
 
-// Discover scans package roots and returns validated manifests. Runtime
-// startup is intentionally separate: discovery is safe to use for listing and
-// policy review before any untrusted code is launched.
-func Discover(roots []string) ([]Manifest, error) {
-	packages, err := DiscoverPackages(roots)
-	if err != nil {
-		return nil, err
-	}
-	manifests := make([]Manifest, 0, len(packages))
-	for _, pkg := range packages {
-		manifests = append(manifests, pkg.Manifest)
-	}
-	return manifests, nil
-}
-
 func DiscoverPackages(roots []string) ([]Package, error) {
 	var paths []string
 	for _, root := range roots {

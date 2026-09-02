@@ -3,11 +3,24 @@ package pluginapi
 import (
 	"context"
 	"fmt"
+	"net"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
 	pluginproto "github.com/Tencent/WeKnora/pkg/pluginapi/proto"
 	"google.golang.org/grpc"
-	"net"
-	"strings"
 )
+
+// maxPluginMsgSize is the default gRPC message limit for plugin servers. It
+// matches the host's docreader limit (50MB) so image-heavy responses fit.
+const maxPluginMsgSize = 50 * 1024 * 1024
+
+// gracefulShutdownTimeout bounds how long GracefulStop may wait for in-flight
+// RPCs after a shutdown trigger, before the server is force-stopped.
+const gracefulShutdownTimeout = 5 * time.Second
 
 type DataSourceHandler struct {
 	PluginID                   string
@@ -140,8 +153,33 @@ func servePlugin(ctx context.Context, address string, opts []grpc.ServerOption, 
 	if err != nil {
 		return fmt.Errorf("listen plugin: %w", err)
 	}
+	// Raise the gRPC message limits so a parser/data-source plugin can return
+	// documents with embedded images without hitting the 4MB default. The
+	// defaults are prepended so callers that pass an explicit limit still win.
+	opts = append([]grpc.ServerOption{grpc.MaxRecvMsgSize(maxPluginMsgSize), grpc.MaxSendMsgSize(maxPluginMsgSize)}, opts...)
 	server := grpc.NewServer(opts...)
 	register(server)
-	go func() { <-ctx.Done(); server.GracefulStop() }()
+
+	// Shut down on either trigger: the host cancelling its context, or the
+	// process receiving a termination signal. Plugins typically serve with
+	// context.Background, so the signal path is what makes graceful stops
+	// work in practice. GracefulStop waits for in-flight RPCs — handlers see
+	// cancellation as soon as the host closes the connection — and the
+	// force-stop bounds the wait for handlers that ignore cancellation.
+	sigCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-sigCtx.Done():
+		}
+		done := make(chan struct{})
+		go func() { server.GracefulStop(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(gracefulShutdownTimeout):
+			server.Stop()
+		}
+	}()
 	return server.Serve(listener)
 }

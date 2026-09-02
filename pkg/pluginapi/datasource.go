@@ -1,7 +1,6 @@
 package pluginapi
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	pluginproto "github.com/Tencent/WeKnora/pkg/pluginapi/proto"
@@ -201,9 +200,4 @@ func DecodeHealth(v *pluginproto.HealthResponse, out *HealthResponse) error {
 	return nil
 }
 
-// Keep these aliases public so external plugins can inspect the exact wire types.
-type ProtoDataSourceRequest = pluginproto.DataSourceRequest
-type ProtoDataSourceResponse = pluginproto.DataSourceResponse
-
 var _ DataSourcePluginServer = (*DataSourceHandler)(nil)
-var _ = context.Background

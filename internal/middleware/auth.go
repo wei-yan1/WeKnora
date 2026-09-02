@@ -66,6 +66,7 @@ var noAuthAPI = map[string][]string{
 	// anonymously is safe — same reasoning as the presigned file route.
 	"/api/v1/datasource/icon/*":           {"GET", "HEAD"},
 	"/api/v1/web-search-providers/icon/*": {"GET", "HEAD"},
+	"/api/v1/vector-stores/icon/*":        {"GET", "HEAD"},
 }
 
 // 检查请求是否在无需认证的API列表中

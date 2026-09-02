@@ -524,6 +524,20 @@ func drainAdmission(ctx context.Context, admission *admissionController, timeout
 	}
 }
 
+// HealthSnapshot returns the last recorded health state without actively
+// probing the plugin. The snapshot is written by Start (post-handshake) and
+// refreshed by the health supervisor; availability checks that must not pay a
+// probe round-trip (e.g. engine lists) should read this instead of Health.
+func (m *Manager) HealthSnapshot(id string) (HealthStatus, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	entry, ok := m.entries[id]
+	if !ok {
+		return HealthStatus{}, false
+	}
+	return entry.state, true
+}
+
 func (m *Manager) Health(ctx context.Context, id string) (HealthStatus, error) {
 	m.mu.RLock()
 	entry, ok := m.entries[id]

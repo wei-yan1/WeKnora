@@ -242,6 +242,8 @@ func RegisterVectorStoreRoutes(r *gin.RouterGroup, h *handler.VectorStoreHandler
 	{
 		// List available engine types (metadata for UI forms) — Viewer+
 		stores.GET("/types", g.Viewer(), h.ListStoreTypes)
+		// Stream a plugin-bundled engine icon — Viewer+
+		stores.GET("/icon/:type", g.Viewer(), h.GetStoreIcon)
 		// Test with raw credentials (no persistence) — Admin+
 		stores.POST("/test", g.Admin(), h.TestStoreRaw)
 		// CRUD

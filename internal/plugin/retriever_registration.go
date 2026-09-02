@@ -3,6 +3,9 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -90,16 +93,47 @@ func RegisterExternalRetriever(
 	// already-registered external engine. Relying on developer discipline would
 	// silently shadow an earlier registration (load order decides the winner).
 	if types.IsValidEngineType(engineType) {
-		return "", fmt.Errorf("retriever engine type %q conflicts with a built-in or already-registered engine type", engineType)
+		return "", fmt.Errorf(
+			"retriever engine type %q conflicts with a built-in or already-registered engine type; "+
+				"use an alias (e.g. %q) and declare score_semantics via Describe so the host normalizes scores correctly",
+			engineType, engineType+"_ext")
+	}
+
+	// Register the runtime with the manager so the loader's manager.Start can
+	// find it and the health supervisor can track it. Unlike model, the loader
+	// (not this adapter) starts the plugin process.
+	if err := manager.Register(manifest, runtime); err != nil {
+		return "", err
 	}
 
 	// Expose the external engine type to VectorStore validation and the
 	// /vector-stores/types listing, mapping the plugin's config fields onto the
 	// registration UI schema so users can create a store without host changes.
+	// Score semantics are NOT read here: the plugin process has not been started
+	// yet (the loader registers adapters before manager.Start), so Describe would
+	// fail. They are fetched lazily on first OpenStore instead.
+	connectionFields, indexFields := configSchemaToVectorStoreFields(manifest.ConfigSchema)
+
+	// Resolve the plugin icon: a bundled local file is served by the host at a
+	// stable route so the frontend can <img> it without knowing the plugin dir;
+	// an http(s) URL is passed through as-is.
+	iconURL := ""
+	if rawIcon, _ := manifest.Metadata["icon"].(string); strings.TrimSpace(rawIcon) != "" {
+		rawIcon = strings.TrimSpace(rawIcon)
+		if iconFile, isLocal := resolveLocalIconFile(manifest.SourceDir, rawIcon); isLocal {
+			types.RegisterExternalVectorStoreIconFile(engineType, iconFile)
+			iconURL = retrieverStoreIconURL(engineTypeStr)
+		} else {
+			iconURL = rawIcon
+		}
+	}
+
 	types.RegisterExternalVectorStoreType(types.VectorStoreTypeInfo{
 		Type:             engineTypeStr,
 		DisplayName:      manifest.Name,
-		ConnectionFields: configFieldsToVectorStoreFields(manifest.Config),
+		ConnectionFields: connectionFields,
+		IndexFields:      indexFields,
+		Icon:             iconURL,
 	})
 
 	registry.put(RetrieverProviderInfo{
@@ -113,6 +147,13 @@ func RegisterExternalRetriever(
 			}
 			defer lease.Close()
 			client := pluginapi.NewRetrieverPluginClient(provider.Conn())
+			// Fetch score semantics lazily on first open: the plugin is running
+			// by now (the loader starts it after registration), so Describe
+			// succeeds here where it could not at registration time. The result
+			// is cached in the external engine-type registry for the normalizer.
+			if desc, err := client.Describe(lease.Context, &pluginproto.RetrieverDescribeRequest{}); err == nil {
+				types.SetExternalEngineScoreSemantics(engineType, desc.GetScoreSemantics())
+			}
 			resp, err := client.OpenStore(lease.Context, &pluginproto.RetrieverOpenStoreRequest{
 				Config: retrieverConfigToStruct(config),
 			})
@@ -140,26 +181,71 @@ func UnregisterExternalRetriever(registry *RetrieverProviderRegistry, engineType
 	types.UnregisterExternalVectorStoreType(engineType)
 }
 
-// configFieldsToVectorStoreFields maps a plugin manifest's config fields onto
+// retrieverStoreIconURL returns the host route that streams a plugin-bundled
+// icon for the given engine type. Keep in sync with the route registered for
+// VectorStoreHandler.GetStoreIcon.
+func retrieverStoreIconURL(engineType string) string {
+	return "/api/v1/vector-stores/icon/" + url.PathEscape(engineType)
+}
+
+// configSchemaToVectorStoreFields maps a plugin's partitioned config_schema onto
 // the VectorStore registration schema, so external engine types get dynamic
-// connection fields without hard-coding engine-specific branches in the host.
-func configFieldsToVectorStoreFields(fields []ConfigField) []types.VectorStoreFieldInfo {
-	if len(fields) == 0 {
-		return nil
+// connection/index fields without hard-coding engine-specific branches in the
+// host. settings + credentials become connection fields (credentials marked
+// sensitive); index_config becomes index fields.
+func configSchemaToVectorStoreFields(schema map[string]any) (connection, index []types.VectorStoreFieldInfo) {
+	appendSection := func(section string, sensitive bool) []types.VectorStoreFieldInfo {
+		props, required := schemaSection(schema, section)
+		keys := make([]string, 0, len(props))
+		for key := range props {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		var out []types.VectorStoreFieldInfo
+		for _, key := range keys {
+			property, _ := props[key].(map[string]any)
+			if property == nil {
+				continue
+			}
+			jsonType, _ := property["type"].(string)
+			secret, _ := property["secret"].(bool)
+			if sensitive {
+				secret = true
+			}
+			enum, _ := property["enum"].([]any)
+			description, _ := property["description"].(string)
+			title, _ := property["title"].(string)
+			_, isRequired := required[key]
+			out = append(out, types.VectorStoreFieldInfo{
+				Name:        key,
+				Type:        vectorStoreFieldType(jsonType),
+				Title:       title,
+				Required:    isRequired,
+				Sensitive:   secret,
+				Default:     property["default"],
+				Description: description,
+				Enum:        toStringSlice(enum),
+			})
+		}
+		return out
 	}
-	out := make([]types.VectorStoreFieldInfo, 0, len(fields))
-	for _, f := range fields {
-		out = append(out, types.VectorStoreFieldInfo{
-			Name:        f.Key,
-			Type:        f.Type,
-			Required:    f.Required,
-			Sensitive:   f.Secret,
-			Default:     f.Default,
-			Description: f.Description,
-			Enum:        f.Enum,
-		})
+	connection = appendSection("settings", false)
+	connection = append(connection, appendSection("credentials", true)...)
+	index = appendSection("index_config", false)
+	return connection, index
+}
+
+// vectorStoreFieldType maps a config_schema type onto the VectorStore UI type,
+// which only understands string / number / boolean.
+func vectorStoreFieldType(declaredType string) string {
+	switch declaredType {
+	case "boolean":
+		return "boolean"
+	case "integer", "number":
+		return "number"
+	default:
+		return "string"
 	}
-	return out
 }
 
 func retrieverConfigToStruct(config pluginapi.RetrieverStoreConfig) *structpb.Struct {

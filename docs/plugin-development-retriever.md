@@ -28,7 +28,7 @@ Retriever 插件与其他四类一样，遵循同一套发现与生命周期协�
 | `api_version` | `weknora.plugin/v1` |
 | `extension_type` | `retriever` |
 | `protocol_version` | `v1` |
-| `entrypoint` | 必填，见 quickstart |
+| `entrypoint` | 必填 |
 | 环境变量 | `WEKNORA_PLUGIN_ADDR`；插件目录用 `WEKNORA_PLUGIN_DIR_RETRIEVER` |
 
 启动后必须实现两个统一服务：
@@ -68,17 +68,19 @@ rpc Patch(RetrieverPatchRequest) returns (RetrieverResponse)
 
 ### 3.2 `OpenStore` / `CloseStore`：会话生命周期
 
-- `OpenStore(config)` → 返回 `store_handle`。插件在这里建立连接、连接池、创建必要的 collection/table/index。
+- `OpenStore(config)` → 返回 `store_handle`。插件在这里建立连接、连接池、创建必要的 collection/table/index。**`OpenStore` 会被多次调用**——宿主的「测试连接」会先 `OpenStore` 探测连通性再立即 `CloseStore`，正式使用时再开一次，所以你的 `Open` 工厂必须幂等、可重复调用，且每次返回独立会话。
 - `store_handle` 是**不透明的、由 SDK 生成**的字符串，插件不应解析它，也不该把租户、地址、凭证编码进去。
-- `CloseStore(store_handle)` → 释放该 Store 的连接、连接池、缓存等资源。
+- `CloseStore(store_handle)` → 释放该 Store 的连接、连接池、缓存等资源。宿主在**删除 VectorStore**（从注册表注销）时会调用它，所以插件必须在这里真正释放后端资源，而不是留到进程退出。
 
 `config`（`RetrieverStoreConfig`）由宿主从 VectorStore 配置映射而来，分三部分：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `Settings` | `map[string]any` | 非敏感连接参数（addr、host、port、use_tls、database 等） |
-| `Credentials` | `map[string]any` | 敏感凭证（username、password、api_key） |
-| `IndexConfig` | `map[string]any` | 索引/collection 配置 |
+| `Settings` | `map[string]any` | 非敏感连接参数。除宿主预置的固定键（`addr`、`host`、`port`、`use_tls`、`database`、`grpc_address`、`scheme`、`http_port`、`insecure_skip_verify`、`use_default_connection`）外，**你在 `config_schema.settings` 里声明的任意自定义字段名（如 `endpoint`、`collection_prefix`、`compat_mode`）也会原样透传到这里** |
+| `Credentials` | `map[string]any` | 敏感凭证。仅宿主预置的三个固定键：`username`、`password`、`api_key` |
+| `IndexConfig` | `map[string]any` | 索引/collection 配置，来自 `config_schema.index_config` 声明的字段 |
+
+> **透传约定**：插件 `config_schema` 里声明的 `settings` 字段（无论叫什么名字）会在运行时原样出现在 `Settings` 里，宿主不解释字段含义。若你的自定义「凭证」字段不叫 `api_key`/`username`/`password`，它会被归入 `Settings` 而非 `Credentials`——请把需要走凭证脱敏逻辑的字段命名为这三个固定名之一。
 
 ### 3.3 `BatchPut`：批量写入
 
@@ -101,15 +103,17 @@ rpc Patch(RetrieverPatchRequest) returns (RetrieverResponse)
 
 ### 3.5 `ScoreSemantics`：分数语义（诚实声明）
 
-插件返回的原始分数，宿主需要知道它是什么语义才能做跨引擎归一化。必须声明为以下三者之一：
+插件返回的分数，宿主需要知道它是什么语义才能做跨引擎归一化。必须声明为以下三者之一（通过 `Describe` 返回，见 3.1 节）：
 
-| 值 | 含义 |
-|---|---|
-| `similarity_higher_better` | 相似度，越大越相关（如余弦相似度归一化到 [0,1]） |
-| `distance_lower_better` | 距离，越小越相关（如 L2 距离） |
-| `rank_only` | 只保证相对排序，分数无绝对意义（如 BM25） |
+| 值 | 宿主归一化行为 | 插件应返回的分数 |
+|---|---|---|
+| `similarity_higher_better` | `clamp01(score)`（原样夹到 [0,1]） | **已归一化到 [0,1] 的相似度**（越大越相关）。若你的后端返回原始 cosine（值域 [-1,1]），请在插件内自行 `(score+1)/2` 归一到 [0,1] 再返回 |
+| `distance_lower_better` | `clamp01(1 - score)`（距离转相似度） | 距离（越小越相关，如 L2 距离） |
+| `rank_only` | 原样透传 | 分数无绝对意义（如 BM25），仅相对排序有效 |
 
-插件**返回原始分数即可**，归一化、NaN/Inf 处理、跨引擎比较、RRF 融合全部由宿主负责。不要自己在插件里做不可逆的分数变换。
+> **获取时机**：宿主的 `score_semantics` 是**懒加载**的——注册插件时插件进程尚未启动（加载器先 `Register` 后 `Start`），所以宿主在**首次 `OpenStore` 时**才调用 `Describe` 读取并缓存。这意味着你只需在 `RetrieverProvider.ScoreSemantics` 里正确声明，无需关心时序。
+
+> **归一化由宿主负责**：NaN/Inf 处理、跨引擎比较、RRF 融合全部由宿主完成。但注意 `similarity_higher_better` 意味着「分数已是 [0,1] 相似度」——插件要自己把原始 cosine 归一化，而不是把 [-1,1] 原样丢给宿主。
 
 ## 4. SDK 侧如何实现：`ServeRetriever`
 
@@ -201,26 +205,36 @@ capabilities:
 
 metadata:
   engine_type: example-vector-db   # 必填：宿主任凭它把 VectorStore 路由到本插件
-  score_semantics: similarity_higher_better
+  icon: example-vector-db.png      # 可选：插件随包 logo（本地文件或 http(s) URL）
+  # 注意：score_semantics 不在 manifest 里声明，而是通过 Describe RPC 返回
+  #（即 SDK 的 RetrieverProvider.ScoreSemantics 字段，见第 4 节示例）
 
 config_schema:                     # 用 JSON Schema 描述 OpenStore 时需要的配置
   type: object
   properties:
-    settings:
+    settings:                      # 非敏感连接参数 → 透传到 config.Settings
       type: object
       required: [endpoint]
       properties:
         endpoint:
           type: string
-        collection_prefix:
-          type: string
-    credentials:
+          title: 服务地址          # title 会在前端作为字段标签显示（缺省回落字段名）
+        timeout:
+          type: integer
+    credentials:                   # 敏感凭证 → 透传到 config.Credentials
       type: object
       required: [api_key]
       properties:
         api_key:
           type: string
           secret: true            # 敏感字段，宿主会脱敏
+          title: API Key
+    index_config:                  # 索引/collection 配置 → 透传到 config.IndexConfig
+      type: object
+      properties:
+        collection_prefix:
+          type: string
+          title: 集合名前缀
 
 permissions:
   network: allowlist               # 需要连后端数据库，声明网络策略
@@ -231,6 +245,18 @@ permissions:
 ### 必填校验
 
 - `metadata.engine_type` **不能为空**——`RegisterExternalRetriever` 明确要求 retriever 插件声明引擎类型，否则无法装载。
+- `metadata.engine_type` **不能与宿主内建引擎类型重名**（`postgres`/`sqlite`/`elasticsearch`/`opensearch`/`qdrant`/`milvus`/`weaviate`/`doris`/`tencent_vectordb`）。要复刻某个内建引擎，请起别名（如 `milvux`），并通过 `ScoreSemantics` 声明正确的分数语义——宿主按语义归一化，不依赖引擎名。
+
+### 图标（icon）
+
+- `metadata.icon`（可选）：插件随包的 logo，支持**本地文件名**（如 `Milvus.png`，相对插件目录）或 **http(s) URL**。
+- 本地文件：宿主注册时解析为绝对路径，并通过**免认证**路由 `/api/v1/vector-stores/icon/:engine_type` 流式返回（浏览器 `<img>` 无法携带认证头）。前端在「向量数据库引擎」的引擎下拉里显示该图标。
+- http(s) URL：直接透传给前端使用。
+- 支持的格式：png / jpg / jpeg / svg / webp / gif / ico，单文件不超过 512KB。
+
+### config_schema 字段的 title
+
+- 每个字段可声明 `title`（如 `title: 服务地址`），宿主会把它透传到前端作为字段标签显示；缺省时前端回落到字段名（或内置字段的 i18n 文案）。
 
 ### 能力声明（capabilities）原则
 
@@ -256,6 +282,7 @@ permissions:
 6. **禁用记录不可被检索**：`Patch` 把 `enabled=false` 后，该记录必须立即从检索结果中排除（不能只在 metadata 里改个字段、检索时却不过滤）。
 7. **分数语义诚实**：`score_semantics` 必须真实反映返回分数的含义。
 8. **`Health` 不聚合 Store 健康**：见第 2 节的警告。
+9. **返回顺序不必严格排序**：宿主会在检索结果进入 RRF 融合前做一次确定性排序（score 降序、`RecordID` 升序兜底），所以你不必保证返回顺序。但建议仍按 score 降序返回，尤其对 `rank_only` 或关键词无打分的场景，稳定的返回顺序有助于结果可复现。
 
 ## 7. 校验与验证
 

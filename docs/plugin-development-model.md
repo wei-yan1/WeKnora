@@ -26,7 +26,7 @@ Model 插件负责把一个外部模型服务（自有模型、第三方 API 等
 | `api_version` | `weknora.plugin/v1` |
 | `extension_type` | `model` |
 | `protocol_version` | `v1` |
-| `entrypoint` | 必填，见 quickstart |
+| `entrypoint` | 必填 |
 | 环境变量 | `WEKNORA_PLUGIN_ADDR` |
 
 启动后必须实现两个统一服务：

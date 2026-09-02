@@ -24,13 +24,13 @@ import (
 	dorisRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/doris"
 	elasticsearchRepoV7 "github.com/Tencent/WeKnora/internal/application/repository/retriever/elasticsearch/v7"
 	elasticsearchRepoV8 "github.com/Tencent/WeKnora/internal/application/repository/retriever/elasticsearch/v8"
+	grpcRetrieverRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/grpc"
 	milvusRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/milvus"
 	openSearchRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/opensearch"
 	postgresRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/postgres"
 	qdrantRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/qdrant"
 	sqliteRetrieverRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/sqlite"
 	tencentVectorDBRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/tencentvectordb"
-	grpcRetrieverRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/grpc"
 	weaviateRepo "github.com/Tencent/WeKnora/internal/application/repository/retriever/weaviate"
 	"github.com/Tencent/WeKnora/internal/application/service/retriever"
 	"github.com/Tencent/WeKnora/internal/config"
@@ -111,19 +111,26 @@ func createExternalRetrieverEngine(store types.VectorStore, provider pluginPkg.R
 // onto the plugin's RetrieverStoreConfig (settings/credentials/index_config).
 func vectorStoreToRetrieverConfig(store types.VectorStore) pluginapi.RetrieverStoreConfig {
 	cc := store.ConnectionConfig
+	settings := map[string]any{
+		"addr":                   cc.Addr,
+		"host":                   cc.Host,
+		"port":                   cc.Port,
+		"use_tls":                cc.UseTLS,
+		"database":               cc.Database,
+		"grpc_address":           cc.GrpcAddress,
+		"scheme":                 cc.Scheme,
+		"http_port":              cc.HTTPPort,
+		"use_default_connection": cc.UseDefaultConnection,
+		"insecure_skip_verify":   cc.InsecureSkipVerify,
+	}
+	// Pass through arbitrary plugin-declared fields captured into Extra so an
+	// external retriever plugin receives exactly what its config_schema asks
+	// for, without the host understanding any backend-specific field names.
+	for k, v := range cc.Extra {
+		settings[k] = v
+	}
 	cfg := pluginapi.RetrieverStoreConfig{
-		Settings: map[string]any{
-			"addr":                   cc.Addr,
-			"host":                   cc.Host,
-			"port":                   cc.Port,
-			"use_tls":                cc.UseTLS,
-			"database":               cc.Database,
-			"grpc_address":           cc.GrpcAddress,
-			"scheme":                 cc.Scheme,
-			"http_port":              cc.HTTPPort,
-			"use_default_connection": cc.UseDefaultConnection,
-			"insecure_skip_verify":   cc.InsecureSkipVerify,
-		},
+		Settings: settings,
 		Credentials: map[string]any{
 			"username": cc.Username,
 			"password": cc.Password,

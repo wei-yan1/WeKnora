@@ -64,17 +64,19 @@ D:\weknora-plugins\          ← 总目录（名称任意）
 
 宿主启动时按这五个环境变量扫描对应目录，递归发现每个插件包里的 `plugin.yaml`（`plugin.yml` / `plugin.json` 亦可）。未设置的环境变量会被忽略；已设置但路径不存在会报错而非静默跳过。每个子目录下可放置多个独立插件包。
 
-## 三、三个真实可用的数据源插件
+## 三、真实可用的插件示例（独立插件仓库）
 
-在本仓库的 `plugins/` 目录下，已有三个**完整可运行**的数据源插件示例。开发者在不修改主仓任何代码的前提下，复制对应目录、改 `plugin.yaml` 的 `id` 和 `config`，就能独立构建出一个新插件。
+插件示例与模板**不放在主仓源码中**，以独立插件仓库形式维护（本机 `D:\weknora-plugins`，后续将发布为独立 GitHub 仓库）。开发者在不修改主仓任何代码的前提下，复制对应目录、改 `plugin.yaml` 的 `id` 和 `config_schema`，就能独立构建出一个新插件。
 
-| 插件 | 类型 | 用途 | 路径 |
+| 插件 | 扩展点 | 用途 | 仓库内路径 |
 |---|---|---|---|
-| **LocalDir** | 进程型 gRPC 插件 | 从本地目录扫描文件接入知识库；用于论文、笔记、文档等本地内容 | `plugins/weknora-plugin-localdir/` |
-| **GitHub** | 进程型 gRPC 插件 | 同步 GitHub 仓库的 README / Markdown 文件到知识库 | （外部安装，目录结构同 LocalDir） |
-| **DingTalk** | 进程型 gRPC 插件 | 同步钉钉文档到知识库 | （外部安装，目录结构同 LocalDir） |
+| **LocalDir** | `datasource` | 从本地目录扫描文件接入知识库；用于论文、笔记、文档等本地内容 | `datasource/weknora-plugin-localdir/` |
+| **GitHub** | `datasource` | 同步 GitHub 仓库的 README / Markdown 文件到知识库 | `datasource/weknora-plugin-github/` |
+| **DingTalk** | `datasource` | 同步钉钉文档到知识库 | `datasource/weknora-plugin-dingtalk/` |
+| **TARily** | `search` | Tavily Search API 的别名版搜索插件 | `search/weknora-plugin-tarily/` |
+| **DS (DeepSeek)** | `model` | DeepSeek 聊天模型提供方（OpenAI 兼容） | `model/weknora-plugin-DS/` |
 
-它们都验证了同一件事：**一个独立于 WeKnora 主仓的外部数据源插件，能通过 Manifest 描述身份 / 能力 / 版本 / 配置 / 权限，由宿主发现、启动、管理，并通过进程外 gRPC 接入现有数据源同步流程，最终把数据导入知识库**。
+它们都验证了同一件事：**一个独立于 WeKnora 主仓的外部插件，能通过 Manifest 描述身份 / 能力 / 版本 / 配置 / 权限，由宿主发现、启动、管理，并通过进程外 gRPC 接入现有流程，且主仓零改动**。
 
 ---
 
@@ -127,17 +129,9 @@ D:\weknora-plugins\          ← 总目录（名称任意）
 
 ---
 
-## 六、本仓库已有的最小独立开发示例
+## 六、插件示例不在主仓源码中
 
-```text
-plugins/
-├── template-datasource/        模板：数据源插件最小脚手架
-├── template-parser/            模板：解析插件最小脚手架
-├── template-web-search/        模板：搜索插件最小脚手架
-└── weknora-plugin-localdir/    真实示例：本地目录数据源（含 go.mod）
-```
-
-每个模板都包含完整的 `plugin.yaml` + Go 入口 + 独立 go.mod（使用 `replace` 指令指向本地 WeKnora 源码以便联调；独立发布时应删除该 replace）。
+主仓不携带任何插件模板或示例插件。全部插件（含后续新增的模板）以独立插件仓库形式维护，按 `datasource/ parser/ search/ model/ retriever/` 五个扩展点子目录组织，每个插件包含完整的 `plugin.yaml` + Go 入口 + 独立 `go.mod`（用 `replace` 指向本地 WeKnora 源码以便联调；独立发布时删除该 replace）。
 
 ---
 

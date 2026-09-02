@@ -6,7 +6,6 @@ import (
 
 	pluginproto "github.com/Tencent/WeKnora/pkg/pluginapi/proto"
 	"google.golang.org/grpc"
-	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // ModelHandler implements ModelPluginServer for external model-provider
@@ -30,7 +29,7 @@ type ModelHandler struct {
 
 // ChatMessage is the SDK view of a chat message.
 type ChatMessage struct {
-	Role             string            // system / user / assistant / tool
+	Role             string // system / user / assistant / tool
 	Content          string
 	Name             string
 	ToolCallID       string
@@ -131,7 +130,7 @@ func (h ModelHandler) Health(ctx context.Context, _ *pluginproto.HealthRequest) 
 func (h ModelHandler) ValidateConfig(ctx context.Context, v *pluginproto.ModelValidateRequest) (*pluginproto.ModelValidateResponse, error) {
 	var err error
 	if h.OnValidateConfig != nil {
-		err = h.OnValidateConfig(ctx, structpbAsMap(v.GetConfig()))
+		err = h.OnValidateConfig(ctx, mapConfig(v.GetConfig()))
 	}
 	return &pluginproto.ModelValidateResponse{Error: errorString(err)}, nil
 }
@@ -221,13 +220,6 @@ func ServeModel(ctx context.Context, address string, handler ModelHandler, opts 
 		RegisterPluginControlServer(s, handler)
 		RegisterModelPluginServer(s, handler)
 	})
-}
-
-func structpbAsMap(v *structpb.Struct) map[string]any {
-	if v == nil {
-		return nil
-	}
-	return v.AsMap()
 }
 
 func decodeChatRequest(v *pluginproto.ModelChatRequest) ChatRequest {

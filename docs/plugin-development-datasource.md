@@ -2,7 +2,7 @@
 
 本文是数据源插件的完整开发指南。五类扩展点共用的插件骨架（Manifest、Runtime、PluginControl、目录装载与治理约定）见本文第 1 节；其余四类扩展点的制作指南见本文第 6 节。
 
-本目录中的 `plugins/weknora-plugin-localdir` 是一个可独立构建的完整示例；`plugins/template-datasource` 是最小脚手架。外部插件不需要修改 WeKnora 主仓的注册表或同步流程。
+主仓不携带任何示例插件或模板——完整示例以独立插件仓库形式提供（宿主从外部目录加载，正好验证「源码外插件」的装载路径）。外部插件不需要修改 WeKnora 主仓的注册表或同步流程。
 
 ## 1. 插件包结构
 
@@ -139,7 +139,7 @@ config_schema:
           default: false
 ```
 
-`config` 列表仍可用于简单插件；当两者同时存在时，宿主优先使用 `config_schema`。
+顶层 `config` 已不再支持，插件必须使用 `config_schema` 声明配置。
 
 ### 1.2.1 凭证分区（credentials）
 
@@ -384,7 +384,7 @@ go test ./internal/plugin -run TestExternalLocalDirectoryProcessRuntime -count=1
 
 ## 5. 最小独立开发盲测
 
-盲测者只拿到本指南和 `plugins/template-datasource`，不得修改 WeKnora 主仓。其交付应当能够：
+盲测者只拿到本指南和一个最小插件骨架（目录结构可参考独立插件仓库中任一插件的 `plugin.yaml` + Go 入口 + 独立 `go.mod`），不得修改 WeKnora 主仓。其交付应当能够：
 
 1. 修改 Manifest 的 ID 和配置字段；
 2. 实现四个 Handler；

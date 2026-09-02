@@ -37,6 +37,12 @@ type RetrieverStoreConfig struct {
 // transactions, dimensions) stay inside the implementation.
 type RetrieverBackend interface {
 	BatchPut(ctx context.Context, records []RetrieverRecord) error
+	// Search returns hits for a query. The host re-sorts results (score
+	// descending, then RecordID ascending) before RRF fusion, so the returned
+	// order is not load-bearing; still, returning hits in score-descending
+	// order is the recommended convention. For keyword-only backends with no
+	// meaningful score (e.g. Qdrant scroll), return score 0 and rely on the
+	// host's deterministic tiebreaker.
 	Search(ctx context.Context, req RetrieverSearchRequest) ([]RetrieverHit, error)
 	Delete(ctx context.Context, recordIDs []string, filter map[string][]string) error
 	Patch(ctx context.Context, recordIDs []string, filter map[string][]string, patch map[string]string) error

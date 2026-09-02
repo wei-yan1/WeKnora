@@ -2,8 +2,6 @@ package types
 
 import (
 	"database/sql/driver"
-	"encoding/json"
-	"log"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/utils"
@@ -92,12 +90,7 @@ type WebSearchProviderParameters struct {
 // Value implements the driver.Valuer interface.
 // Encrypts APIKey before persisting to database.
 func (p WebSearchProviderParameters) Value() (driver.Value, error) {
-	if key := utils.GetAESKey(); key != nil && p.APIKey != "" {
-		if encrypted, err := utils.EncryptAESGCM(p.APIKey, key); err == nil {
-			p.APIKey = encrypted
-		}
-	}
-	return json.Marshal(p)
+	return utils.MarshalWithSecrets(p, "api_key")
 }
 
 // Scan implements the sql.Scanner interface.
@@ -110,16 +103,7 @@ func (p *WebSearchProviderParameters) Scan(value interface{}) error {
 	if !ok {
 		return nil
 	}
-	if err := json.Unmarshal(b, p); err != nil {
-		return err
-	}
-	if plain, ok := utils.DecryptStoredSecretLenient(p.APIKey); ok {
-		p.APIKey = plain
-	} else {
-		log.Printf("[crypto] web search provider api_key: decrypt failed (SYSTEM_AES_KEY missing/rotated?), treating as unconfigured")
-		p.APIKey = ""
-	}
-	return nil
+	return utils.UnmarshalWithSecrets(b, p, "api_key")
 }
 
 // WebSearchProviderTypeInfo describes the metadata of a provider type.

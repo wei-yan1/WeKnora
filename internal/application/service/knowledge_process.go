@@ -3597,7 +3597,11 @@ func (s *knowledgeService) convert(
 	s.beginStage(ctx, knowledge.ID, types.StageDocReader, docInput)
 	isURL := payload.URL != ""
 	fileType := payload.FileType
-	tenantOverrides := s.getParserEngineOverridesFromContext(ctx)
+	parserEngine := eff.ChunkingConfig.ResolveParserEngine(fileType)
+	if isURL {
+		parserEngine = eff.ChunkingConfig.ResolveParserEngine("url")
+	}
+	tenantOverrides := s.getParserEngineOverridesFromContext(ctx, parserEngine)
 	var uploadOverrides map[string]string
 	if processOverrides, err := knowledge.ProcessOverrides(); err == nil && processOverrides != nil {
 		uploadOverrides = processOverrides.ParserEngineOverrides
@@ -3626,11 +3630,6 @@ func (s *knowledgeService) convert(
 				werrors.ErrCodeDocReaderParseFailed, "URL rejected for security reasons", err)
 			return nil, nil
 		}
-	}
-
-	parserEngine := eff.ChunkingConfig.ResolveParserEngine(fileType)
-	if isURL {
-		parserEngine = eff.ChunkingConfig.ResolveParserEngine("url")
 	}
 
 	logger.Infof(ctx, "[convert] kb=%s fileType=%s isURL=%v engine=%q rules=%+v",

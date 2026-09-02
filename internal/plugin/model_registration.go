@@ -7,7 +7,6 @@ import (
 	"time"
 
 	modelprovider "github.com/Tencent/WeKnora/internal/models/provider"
-	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/pkg/pluginapi"
 	pluginproto "github.com/Tencent/WeKnora/pkg/pluginapi/proto"
 )
@@ -25,7 +24,7 @@ var modelReservedKeys = map[string]struct{}{
 // synchronous — unlike the datasource connector factory, there is no lazy-start
 // hook to defer the connection. The runtime is therefore started eagerly here
 // so a live gRPC client can be registered before any model is resolved.
-func RegisterExternalModel(manager *Manager, manifest Manifest, runtime Runtime, lazyStart bool) (string, error) {
+func RegisterExternalModel(manager *Manager, manifest Manifest, runtime Runtime) (string, error) {
 	if manifest.ExtensionType != ExtensionModel {
 		return "", fmt.Errorf("plugin %q is not a model", manifest.ID)
 	}
@@ -92,12 +91,7 @@ func RegisterExternalModel(manager *Manager, manifest Manifest, runtime Runtime,
 			description = strings.TrimSpace(v)
 		}
 	}
-	var configFields []types.WebSearchProviderConfigField
-	if len(manifest.ConfigSchema) > 0 {
-		configFields = configFieldsFromSchema(manifest.ConfigSchema, modelReservedKeys)
-	} else {
-		configFields = configFieldsFromLegacy(manifest.Config, modelReservedKeys)
-	}
+	configFields := configFieldsFromSchema(manifest.ConfigSchema, modelReservedKeys)
 	modelprovider.RegisterExternalModelInfo(modelprovider.ExternalModelInfo{
 		Provider:     modelProvider,
 		Name:         manifest.Name,

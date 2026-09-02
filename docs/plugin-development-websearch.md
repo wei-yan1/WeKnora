@@ -18,9 +18,9 @@ Web Search 插件与其他四类一样，遵循同一套发现与生命周期协
 | 项 | Web Search 插件取值 |
 |---|---|
 | `api_version` | `weknora.plugin/v1` |
-| `extension_type` | `search`（**注意不是 `web_search`**，源码常量就是 `search`） |
+| `extension_type` | `search` |
 | `protocol_version` | `v1` |
-| `entrypoint` | 必填，见 quickstart |
+| `entrypoint` | 必填 |
 | 环境变量 | `WEKNORA_PLUGIN_ADDR` |
 
 启动后必须实现两个统一服务：
@@ -111,7 +111,7 @@ func main() {
 要点：
 
 - `WebSearchHandler.PluginID` 必须与 `plugin.yaml` 的 `id` 一致。
-- `WebSearchHandler.Capabilities` 必须与 `plugin.yaml` 的 `capabilities` **逐项一致**——宿主握手时会做双向严格校验：manifest 声明了但 runtime 未回显、或 runtime 回显了 manifest 未声明，都会导致装载失败。本文示例统一用 `"search"`（与模板 `template-web-search` 一致）。
+- `WebSearchHandler.Capabilities` 必须与 `plugin.yaml` 的 `capabilities` **逐项一致**——宿主握手时会做双向严格校验：manifest 声明了但 runtime 未回显、或 runtime 回显了 manifest 未声明，都会导致装载失败。本文示例统一用 `"search"`。
 - `OnSearch` 为 nil 时返回 `Error: "web search handler is not implemented"`。
 - `Handshake` / `Health` 由 `WebSearchHandler` 自动实现。
 - 出站请求请用 `pluginapi.NewPluginHTTPClient()`（读取宿主注入的网络策略），不要用裸 `http.Client` / `http.DefaultClient`——否则 `permissions.network` 白名单不生效，等于绕过了框架的安全模型。

@@ -1378,7 +1378,13 @@ export default {
       vlmServerUrlHint: 'Required when Backend is vlm-http-client or hybrid-http-client',
       paddleocrVlEndpointPlaceholder: 'e.g. http://your-paddleocr-vl:8080',
       paddleocrVlEndpointHint: 'Base URL of the full PaddleOCR-VL pipeline service; no /layout-parsing suffix needed',
-      paddleocrVlCloudTokenPlaceholder: 'PaddleOCR-VL AI Studio Token'
+      paddleocrVlCloudTokenPlaceholder: 'PaddleOCR-VL AI Studio Token',
+      backend: 'Backend',
+      apiKey: 'API Key',
+      modelVersion: 'Model Version',
+      ocr: 'OCR',
+      token: 'Token',
+      model: 'Model'
     },
     storageBackend: {
       description: 'Manage the storage instances used for files and images; multiple instances of the same type can be configured.',

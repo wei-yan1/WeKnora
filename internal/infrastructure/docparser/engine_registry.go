@@ -26,6 +26,14 @@ type EngineRegistration interface {
 	NewReader(ctx context.Context, deps ReaderDeps) (interfaces.DocReader, error)
 }
 
+// ExternalPluginEngineMetadata is implemented only by parser engines backed
+// by an independently loaded plugin. Keeping it optional lets all existing
+// built-in registrations keep the small EngineRegistration contract.
+type ExternalPluginEngineMetadata interface {
+	PluginID() string
+	ConfigSchema() map[string]any
+}
+
 // ReaderDeps carries everything an engine may need to build its reader but
 // cannot construct itself: tenant configuration, tenant credentials, and the
 // shared docreader connection.
@@ -90,6 +98,52 @@ func ListRegisteredEngines() []EngineRegistration {
 	localEnginesMu.RLock()
 	defer localEnginesMu.RUnlock()
 	return append([]EngineRegistration(nil), localEngines...)
+}
+
+// ExternalPluginMetadata returns the stable plugin identity and declared
+// configuration schema for a locally registered external parser engine.
+// Callers use the plugin ID to isolate tenant configuration by plugin rather
+// than by a user-facing engine name.
+func ExternalPluginMetadata(engineName string) (pluginID string, configSchema map[string]any, ok bool) {
+	registration, found := lookupEngine(engineName)
+	if !found {
+		return "", nil, false
+	}
+	metadata, isExternal := registration.(ExternalPluginEngineMetadata)
+	if !isExternal || metadata.PluginID() == "" {
+		return "", nil, false
+	}
+	return metadata.PluginID(), metadata.ConfigSchema(), true
+}
+
+// ExternalPluginMetadataByID resolves the engine metadata from a manifest
+// plugin ID. It is used when validating tenant settings submitted from the
+// dynamic parser-plugin form.
+func ExternalPluginMetadataByID(pluginID string) (engineName string, configSchema map[string]any, ok bool) {
+	if pluginID == "" {
+		return "", nil, false
+	}
+	for _, registration := range ListRegisteredEngines() {
+		metadata, isExternal := registration.(ExternalPluginEngineMetadata)
+		if !isExternal || metadata.PluginID() != pluginID {
+			continue
+		}
+		return registration.Name(), metadata.ConfigSchema(), true
+	}
+	return "", nil, false
+}
+
+// OverridesForEngine returns the tenant configuration that belongs to one
+// parser engine. Built-in engines retain the historical flat override map;
+// external engines receive only the configuration scoped to their plugin ID.
+func OverridesForEngine(config *types.ParserEngineConfig, engineName string) map[string]string {
+	if config == nil {
+		return nil
+	}
+	if pluginID, _, ok := ExternalPluginMetadata(engineName); ok {
+		return config.ExternalPluginOverrides(pluginID)
+	}
+	return config.ToOverridesMap()
 }
 
 // lookupEngine returns the locally registered engine with this name.
@@ -173,13 +227,19 @@ func ListAllEngines(
 		}
 
 		available, reason := e.CheckAvailable(docreaderConnected, overrides)
-		result = append(result, types.ParserEngineInfo{
+		info := types.ParserEngineInfo{
 			Name:              name,
 			Description:       description,
 			FileTypes:         fileTypes,
 			Available:         available,
 			UnavailableReason: reason,
-		})
+		}
+		if metadata, ok := e.(ExternalPluginEngineMetadata); ok && metadata.PluginID() != "" {
+			info.External = true
+			info.PluginID = metadata.PluginID()
+			info.ConfigSchema = metadata.ConfigSchema()
+		}
+		result = append(result, info)
 	}
 
 	for _, re := range remoteEngines {

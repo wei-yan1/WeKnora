@@ -37,7 +37,7 @@ type DockerRuntime struct {
 	cmd           *exec.Cmd
 	conn          *grpc.ClientConn
 	controlClient pluginapi.PluginControlClient
-	socket        string
+	containerName string
 	ownsSocketDir bool
 	AuditSink     AuditSink
 }
@@ -80,7 +80,7 @@ func (r *DockerRuntime) Start(ctx context.Context) error {
 	}
 	hostSocket := filepath.Join(dir, "plugin.sock")
 	containerSocket := "/run/weknora/plugin.sock"
-	containerName := "weknora-plugin-" + strings.NewReplacer(".", "-", "_", "-").Replace(r.Manifest.ID)
+	containerName := r.pluginContainerName()
 	args := r.dockerArgs(dir, containerSocket, containerName)
 	cmd := exec.Command(docker, args...)
 	var stderr io.ReadCloser
@@ -123,26 +123,58 @@ func (r *DockerRuntime) Start(ctx context.Context) error {
 		return err
 	}
 	r.mu.Lock()
-	r.cmd, r.conn, r.controlClient, r.socket = cmd, conn, controlClient, hostSocket
+	r.cmd, r.conn, r.controlClient, r.containerName = cmd, conn, controlClient, containerName
 	r.mu.Unlock()
 	return nil
+}
+
+// pluginContainerName derives the deterministic container name shared between
+// docker run (Start) and docker stop (Stop).
+func (r *DockerRuntime) pluginContainerName() string {
+	return "weknora-plugin-" + strings.NewReplacer(".", "-", "_", "-").Replace(r.Manifest.ID)
 }
 
 func (r *DockerRuntime) dockerArgs(dir, containerSocket, containerName string) []string {
 	return []string{"run", "--rm", "--name", containerName, "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "128", "--memory", "512m", "-v", dir + ":/run/weknora:rw", "-e", "WEKNORA_PLUGIN_ADDR=unix://" + containerSocket, "-e", "WEKNORA_PLUGIN_ID=" + r.Manifest.ID, "-e", "WEKNORA_PLUGIN_PROTOCOL_VERSION=" + r.Manifest.ProtocolVersion, "-e", "WEKNORA_PLUGIN_NETWORK_POLICY=" + string(r.Manifest.EffectiveNetworkPolicy()), "-e", "WEKNORA_PLUGIN_NETWORK_ALLOWLIST=" + strings.Join(r.Manifest.Permissions.AllowedDestinations, ","), r.Image}
 }
 
-func (r *DockerRuntime) Stop(context.Context) error {
+// dockerStopGrace is the container-level SIGTERM window granted by
+// `docker stop -t` before Docker force-kills the container.
+const dockerStopGrace = 5 * time.Second
+
+// Stop cancels in-flight calls, then stops the container through Docker's own
+// lifecycle: SIGTERM inside the container, the grace window, then SIGKILL —
+// the same cancel-then-force semantics as the process runtime. Signaling or
+// killing the docker CLI child process instead would orphan a running
+// container, so the CLI is only killed as a fallback when the container-level
+// stop fails.
+func (r *DockerRuntime) Stop(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	r.mu.Lock()
-	cmd, conn, dir, ownsDir := r.cmd, r.conn, r.SocketDir, r.ownsSocketDir
+	cmd, conn, dir, ownsDir, container := r.cmd, r.conn, r.SocketDir, r.ownsSocketDir, r.containerName
 	r.cmd, r.conn, r.controlClient = nil, nil, nil
 	r.ownsSocketDir = false
 	r.mu.Unlock()
 	if conn != nil {
 		_ = conn.Close()
 	}
+	if container != "" {
+		docker := r.DockerBinary
+		if docker == "" {
+			docker = "docker"
+		}
+		stopCtx, cancel := context.WithTimeout(ctx, dockerStopGrace+10*time.Second)
+		defer cancel()
+		stop := exec.CommandContext(stopCtx, docker, "stop", "-t", fmt.Sprintf("%d", int(dockerStopGrace.Seconds())), container)
+		if err := stop.Run(); err != nil && cmd != nil && cmd.Process != nil {
+			// Container-level stop failed; kill the CLI process so Stop never
+			// hangs on a wedged docker invocation.
+			_ = cmd.Process.Kill()
+		}
+	}
 	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	}
 	if dir == "" || !ownsDir {

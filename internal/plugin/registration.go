@@ -62,7 +62,7 @@ func registerExternalDataSource(manager *Manager, registry *datasource.Connector
 			ConnectorType:     connectorType,
 			Client:            client,
 			StreamingClient:   streaming,
-			ConfigSchema:      EffectiveConfigSchema(manifest),
+			ConfigSchema:      manifest.ConfigSchema,
 			Invocation:        invocationFromScope(scope),
 			RuntimeGeneration: generation,
 			RuntimeContext:    invocationLease.Context,
@@ -120,7 +120,7 @@ func ConnectorMetadataFromManifest(manifest Manifest, connectorType string) data
 		Name:         manifest.Name,
 		AuthType:     "none",
 		Capabilities: manifest.Capabilities,
-		ConfigSchema: EffectiveConfigSchema(manifest),
+		ConfigSchema: manifest.ConfigSchema,
 		External:     true,
 	}
 	if manifest.Metadata == nil {

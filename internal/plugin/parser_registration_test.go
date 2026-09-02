@@ -31,10 +31,12 @@ func TestExternalParserRegistrationUsesExistingDocparserRegistry(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	server := grpc.NewServer()
+	var receivedOverrides map[string]string
 	pluginapi.RegisterParserPluginServer(server, pluginapi.ParserHandler{
 		PluginID:     "test.external-parser",
 		Capabilities: []string{"parse"},
 		OnParse: func(_ context.Context, request pluginapi.ParserRequest) (pluginapi.ParserResponse, error) {
+			receivedOverrides = request.ParserEngineOverrides
 			return pluginapi.ParserResponse{MarkdownContent: "external:" + string(request.FileContent)}, nil
 		},
 	})
@@ -49,7 +51,26 @@ func TestExternalParserRegistrationUsesExistingDocparserRegistry(t *testing.T) {
 
 	engineName := "test_external_parser"
 	descriptor := ParserDescriptor{EngineName: engineName, Description: "test parser", FileTypes: []string{"txt"}}
-	manifest := Manifest{APIVersion: APIVersionV1, ID: "test.external-parser", Name: "Test External Parser", Version: "1.0.0", ExtensionType: ExtensionParser, ProtocolVersion: ProtocolVersionV1, Capabilities: []string{"parse"}, Metadata: map[string]any{"file_types": []any{"txt"}}}
+	manifest := Manifest{
+		APIVersion:      APIVersionV1,
+		ID:              "test.external-parser",
+		Name:            "Test External Parser",
+		Version:         "1.0.0",
+		ExtensionType:   ExtensionParser,
+		ProtocolVersion: ProtocolVersionV1,
+		Capabilities:    []string{"parse"},
+		ConfigSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"settings": map[string]any{
+					"type":       "object",
+					"required":   []any{"timeout"},
+					"properties": map[string]any{"timeout": map[string]any{"type": "integer"}},
+				},
+			},
+		},
+		Metadata: map[string]any{"file_types": []any{"txt"}},
+	}
 	runtime := &parserTestRuntime{conn: conn}
 	manager := NewManager("")
 	require.NoError(t, RegisterExternalParser(manager, manifest, runtime, descriptor, false))
@@ -65,13 +86,22 @@ func TestExternalParserRegistrationUsesExistingDocparserRegistry(t *testing.T) {
 			found = true
 			require.True(t, engine.Available)
 			require.Equal(t, []string{"txt"}, engine.FileTypes)
+			require.True(t, engine.External)
+			require.Equal(t, manifest.ID, engine.PluginID)
+			require.NotNil(t, engine.ConfigSchema)
 		}
 	}
 	require.True(t, found, "external parser was not listed")
 
-	reader, err := docparser.NewReader(ctx, engineName, "txt", false, docparser.ReaderDeps{})
+	pluginConfig := &types.ParserEngineConfig{ExternalPluginConfigs: map[string]types.ExternalParserPluginConfig{
+		manifest.ID: {Settings: map[string]any{"timeout": 42}},
+	}}
+	overrides := docparser.OverridesForEngine(pluginConfig, engineName)
+	require.Equal(t, map[string]string{"timeout": "42"}, overrides)
+	reader, err := docparser.NewReader(ctx, engineName, "txt", false, docparser.ReaderDeps{Overrides: overrides})
 	require.NoError(t, err)
-	result, err := reader.Read(ctx, &types.ReadRequest{FileContent: []byte("hello"), FileName: "a.txt", FileType: "txt"})
+	result, err := reader.Read(ctx, &types.ReadRequest{FileContent: []byte("hello"), FileName: "a.txt", FileType: "txt", ParserEngineOverrides: overrides})
 	require.NoError(t, err)
 	require.Equal(t, "external:hello", result.MarkdownContent)
+	require.Equal(t, "42", receivedOverrides["timeout"])
 }
