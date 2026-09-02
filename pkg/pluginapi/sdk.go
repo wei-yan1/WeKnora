@@ -156,7 +156,10 @@ func servePlugin(ctx context.Context, address string, opts []grpc.ServerOption, 
 	// Raise the gRPC message limits so a parser/data-source plugin can return
 	// documents with embedded images without hitting the 4MB default. The
 	// defaults are prepended so callers that pass an explicit limit still win.
-	opts = append([]grpc.ServerOption{grpc.MaxRecvMsgSize(maxPluginMsgSize), grpc.MaxSendMsgSize(maxPluginMsgSize)}, opts...)
+	opts = append(
+		[]grpc.ServerOption{grpc.MaxRecvMsgSize(maxPluginMsgSize), grpc.MaxSendMsgSize(maxPluginMsgSize)},
+		opts...,
+	)
 	server := grpc.NewServer(opts...)
 	register(server)
 

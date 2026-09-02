@@ -84,7 +84,7 @@ func TestModelResolverSurvivesRestart(t *testing.T) {
 	manager := NewManager("")
 	runtime := &swappableModelRuntime{conn: conn1}
 
-	providerName, err := RegisterExternalModel(manager, manifest, runtime, false)
+	providerName, err := RegisterExternalModel(manager, manifest, runtime)
 	require.NoError(t, err)
 	require.Equal(t, manifest.ID, providerName)
 	t.Cleanup(func() {
@@ -149,7 +149,7 @@ func TestModelResolverGenerationFencing(t *testing.T) {
 	}
 	manager := NewManager("")
 	runtime := &swappableModelRuntime{conn: conn}
-	providerName, err := RegisterExternalModel(manager, manifest, runtime, false)
+	providerName, err := RegisterExternalModel(manager, manifest, runtime)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_ = manager.Unregister(context.Background(), manifest.ID)

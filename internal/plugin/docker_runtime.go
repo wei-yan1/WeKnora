@@ -167,7 +167,8 @@ func (r *DockerRuntime) Stop(ctx context.Context) error {
 		}
 		stopCtx, cancel := context.WithTimeout(ctx, dockerStopGrace+10*time.Second)
 		defer cancel()
-		stop := exec.CommandContext(stopCtx, docker, "stop", "-t", fmt.Sprintf("%d", int(dockerStopGrace.Seconds())), container)
+		graceSeconds := fmt.Sprintf("%d", int(dockerStopGrace.Seconds()))
+		stop := exec.CommandContext(stopCtx, docker, "stop", "-t", graceSeconds, container)
 		if err := stop.Run(); err != nil && cmd != nil && cmd.Process != nil {
 			// Container-level stop failed; kill the CLI process so Stop never
 			// hangs on a wedged docker invocation.

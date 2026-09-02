@@ -123,7 +123,9 @@ func (r *ProcessRuntime) startOnce(ctx context.Context, address string) error {
 	conn, err := grpc.DialContext(connectCtx, address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithBlock(),
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxPluginMsgSize), grpc.MaxCallSendMsgSize(maxPluginMsgSize)),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(maxPluginMsgSize), grpc.MaxCallSendMsgSize(maxPluginMsgSize),
+		),
 	)
 	if err != nil {
 		_ = cmd.Process.Kill()

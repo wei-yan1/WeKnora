@@ -99,7 +99,7 @@ type modelAdapter struct{}
 func (modelAdapter) ExtensionType() string { return ExtensionModel }
 
 func (modelAdapter) Register(manager *Manager, manifest Manifest, runtime Runtime) (adapterHandle, error) {
-	providerName, err := RegisterExternalModel(manager, manifest, runtime, false)
+	providerName, err := RegisterExternalModel(manager, manifest, runtime)
 	return adapterHandle{modelProvider: providerName}, err
 }
 
