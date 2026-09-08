@@ -3,12 +3,7 @@ package plugin
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -18,170 +13,116 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// DockerRuntime is the server-side secure runtime for the P0 no-network
-// acceptance path. It talks to the plugin over a mounted Unix socket, so the
-// plugin container needs no network namespace at all. The main application
-// does not need Docker socket access through this type; production deployments
-// should invoke it from a constrained runtime-agent when Docker privileges are
-// separated from the API process.
+// DockerRuntime is the server-side OCI runtime. It talks to the plugin over a
+// mounted Unix socket and always starts the container with --network none. If
+// the effective policy permits networking, a per-plugin host-side egress proxy
+// is mounted beside the control socket; the plugin still has no network
+// namespace and can only leave through that proxy.
+//
+// The actual container launch / socket directory / egress proxy lifecycle is
+// delegated to a PluginRuntimeController. The default local controller runs the
+// docker CLI in-process (dev / single-process); production separates Docker
+// privileges into a runtime-agent via NewDockerRuntimeWithController.
 //
 // DockerRuntime depends only on the shared control-plane client
 // (pluginapi.PluginControlClient), never on type-specific protocol clients.
 type DockerRuntime struct {
-	Manifest     Manifest
-	Image        string
-	DockerBinary string
-	SocketDir    string
+	Manifest   Manifest
+	Image      string
+	controller PluginRuntimeController
+	AuditSink  AuditSink
 
 	mu            sync.RWMutex
-	cmd           *exec.Cmd
 	conn          *grpc.ClientConn
 	controlClient pluginapi.PluginControlClient
 	containerName string
-	ownsSocketDir bool
-	AuditSink     AuditSink
 }
 
 func NewDockerRuntime(manifest Manifest, image string) *DockerRuntime {
-	return &DockerRuntime{Manifest: manifest, Image: image, DockerBinary: "docker", AuditSink: LoggerAuditSink{}}
+	sink := LoggerAuditSink{}
+	return &DockerRuntime{
+		Manifest:   manifest,
+		Image:      image,
+		controller: NewLocalDockerRuntimeController("", sink),
+		AuditSink:  sink,
+	}
 }
 
-func (r *DockerRuntime) Start(ctx context.Context) error {
-	r.mu.Lock()
-	if r.cmd != nil && r.clientReadyLocked() {
-		r.mu.Unlock()
+// NewDockerRuntimeWithController builds a DockerRuntime whose container launch
+// and egress lifecycle are handled by the given controller (e.g. a remote
+// runtime-agent in production). The runtime still owns the gRPC connection,
+// handshake and health probing.
+func NewDockerRuntimeWithController(manifest Manifest, image string, controller PluginRuntimeController) *DockerRuntime {
+	return &DockerRuntime{
+		Manifest:   manifest,
+		Image:      image,
+		controller: controller,
+		AuditSink:  LoggerAuditSink{},
+	}
+}
+
+func (r *DockerRuntime) startRequest() StartPluginRequest {
+	return StartPluginRequest{
+		PluginID:            r.Manifest.ID,
+		Image:               r.Image,
+		ExtensionType:       string(r.Manifest.ExtensionType),
+		ProtocolVersion:     r.Manifest.ProtocolVersion,
+		NetworkPolicy:       r.Manifest.EffectiveNetworkPolicy(),
+		AllowedDestinations: r.Manifest.Permissions.AllowedDestinations,
+	}
+}
+
+func (r *DockerRuntime) Start(ctx context.Context) (err error) {
+	r.mu.RLock()
+	ready := r.clientReadyLocked()
+	r.mu.RUnlock()
+	if ready {
 		return nil
 	}
-	r.mu.Unlock()
-	if r.Image == "" {
-		return fmt.Errorf("plugin %q has no OCI image", r.Manifest.ID)
-	}
-	if r.Manifest.EffectiveNetworkPolicy() != NetworkNone {
-		return fmt.Errorf("docker runtime currently requires network policy none; controlled egress belongs in the runtime agent")
-	}
-	docker := r.DockerBinary
-	if docker == "" {
-		docker = "docker"
-	}
-	dir := r.SocketDir
-	if dir == "" {
-		var err error
-		dir, err = os.MkdirTemp("", "weknora-plugin-")
-		if err != nil {
-			return err
-		}
-		r.mu.Lock()
-		r.SocketDir = dir
-		r.ownsSocketDir = true
-		r.mu.Unlock()
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	handle, err := r.controller.Start(ctx, r.startRequest())
+	if err != nil {
 		return err
 	}
-	hostSocket := filepath.Join(dir, "plugin.sock")
-	containerSocket := "/run/weknora/plugin.sock"
-	containerName := r.pluginContainerName()
-	args := r.dockerArgs(dir, containerSocket, containerName)
-	cmd := exec.Command(docker, args...)
-	var stderr io.ReadCloser
-	if r.AuditSink != nil {
-		p, perr := cmd.StderrPipe()
-		if perr != nil {
-			return fmt.Errorf("capture docker plugin stderr: %w", perr)
-		}
-		stderr = p
-	}
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start docker plugin: %w", err)
-	}
-	if stderr != nil {
-		go ConsumePluginStderr(stderr, r.Manifest.ID, r.AuditSink)
-	}
+	// Connect to the plugin's control socket and handshake. On any failure the
+	// controller is asked to tear the container down again so a retry is clean.
 	connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	dialer := func(dialCtx context.Context, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(dialCtx, "unix", hostSocket)
+		return (&net.Dialer{}).DialContext(dialCtx, "unix", handle.ControlSocket)
 	}
-	conn, err := grpc.DialContext(connectCtx, "unix://"+hostSocket, grpc.WithContextDialer(dialer), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	conn, err := grpc.DialContext(connectCtx, "unix://"+handle.ControlSocket, grpc.WithContextDialer(dialer), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	if err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		_ = r.controller.Stop(context.Background(), r.Manifest.ID)
 		return fmt.Errorf("connect docker plugin: %w", err)
 	}
 	controlClient := pluginapi.NewPluginControlClient(conn)
 	handshakeWire, err := controlClient.Handshake(connectCtx, &pluginproto.HandshakeRequest{})
 	if err != nil {
 		_ = conn.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		_ = r.controller.Stop(context.Background(), r.Manifest.ID)
 		return fmt.Errorf("docker plugin handshake: %w", err)
 	}
 	if _, err := validateHandshake(r.Manifest, handshakeWire); err != nil {
 		_ = conn.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		_ = r.controller.Stop(context.Background(), r.Manifest.ID)
 		return err
 	}
 	r.mu.Lock()
-	r.cmd, r.conn, r.controlClient, r.containerName = cmd, conn, controlClient, containerName
+	r.conn, r.controlClient, r.containerName = conn, controlClient, handle.ContainerName
 	r.mu.Unlock()
 	return nil
 }
 
-// pluginContainerName derives the deterministic container name shared between
-// docker run (Start) and docker stop (Stop).
-func (r *DockerRuntime) pluginContainerName() string {
-	return "weknora-plugin-" + strings.NewReplacer(".", "-", "_", "-").Replace(r.Manifest.ID)
-}
-
-func (r *DockerRuntime) dockerArgs(dir, containerSocket, containerName string) []string {
-	return []string{"run", "--rm", "--name", containerName, "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "128", "--memory", "512m", "-v", dir + ":/run/weknora:rw", "-e", "WEKNORA_PLUGIN_ADDR=unix://" + containerSocket, "-e", "WEKNORA_PLUGIN_ID=" + r.Manifest.ID, "-e", "WEKNORA_PLUGIN_PROTOCOL_VERSION=" + r.Manifest.ProtocolVersion, "-e", "WEKNORA_PLUGIN_NETWORK_POLICY=" + string(r.Manifest.EffectiveNetworkPolicy()), "-e", "WEKNORA_PLUGIN_NETWORK_ALLOWLIST=" + strings.Join(r.Manifest.Permissions.AllowedDestinations, ","), r.Image}
-}
-
-// dockerStopGrace is the container-level SIGTERM window granted by
-// `docker stop -t` before Docker force-kills the container.
-const dockerStopGrace = 5 * time.Second
-
-// Stop cancels in-flight calls, then stops the container through Docker's own
-// lifecycle: SIGTERM inside the container, the grace window, then SIGKILL —
-// the same cancel-then-force semantics as the process runtime. Signaling or
-// killing the docker CLI child process instead would orphan a running
-// container, so the CLI is only killed as a fallback when the container-level
-// stop fails.
 func (r *DockerRuntime) Stop(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	r.mu.Lock()
-	cmd, conn, dir, ownsDir, container := r.cmd, r.conn, r.SocketDir, r.ownsSocketDir, r.containerName
-	r.cmd, r.conn, r.controlClient = nil, nil, nil
-	r.ownsSocketDir = false
+	conn := r.conn
+	r.conn, r.controlClient = nil, nil
+	r.containerName = ""
 	r.mu.Unlock()
 	if conn != nil {
 		_ = conn.Close()
 	}
-	if container != "" {
-		docker := r.DockerBinary
-		if docker == "" {
-			docker = "docker"
-		}
-		stopCtx, cancel := context.WithTimeout(ctx, dockerStopGrace+10*time.Second)
-		defer cancel()
-		graceSeconds := fmt.Sprintf("%d", int(dockerStopGrace.Seconds()))
-		stop := exec.CommandContext(stopCtx, docker, "stop", "-t", graceSeconds, container)
-		if err := stop.Run(); err != nil && cmd != nil && cmd.Process != nil {
-			// Container-level stop failed; kill the CLI process so Stop never
-			// hangs on a wedged docker invocation.
-			_ = cmd.Process.Kill()
-		}
-	}
-	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Wait()
-	}
-	if dir == "" || !ownsDir {
-		return nil
-	}
-	return os.RemoveAll(dir)
+	return r.controller.Stop(ctx, r.Manifest.ID)
 }
 
 func (r *DockerRuntime) Health(ctx context.Context) HealthStatus {

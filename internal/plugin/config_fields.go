@@ -24,7 +24,47 @@ func configFieldsFromSchema(schema map[string]any, reserved map[string]struct{})
 		return nil
 	}
 	var fields []types.WebSearchProviderConfigField
-	appendSection := func(section string, forceSecret bool) {
+	for _, d := range normalizeConfigSchema(schema, "settings", "credentials") {
+		if _, isReserved := reserved[d.Key]; isReserved {
+			continue
+		}
+		fields = append(fields, types.WebSearchProviderConfigField{
+			Key:         d.Key,
+			Label:       d.Title,
+			Type:        configFieldType(d.Type, d.Secret, len(d.Enum) > 0),
+			Required:    d.Required,
+			Default:     configFieldDefaultString(d.Default),
+			Description: d.Description,
+			Options:     stringEnumOptions(d.Enum),
+		})
+	}
+	return fields
+}
+
+// SchemaFieldDescriptor is a neutral description of one config_schema field,
+// shared by every extension adapter so field semantics (type / secret / title
+// fallback) are normalized once instead of re-implemented per extension.
+type SchemaFieldDescriptor struct {
+	Key         string
+	Section     string // settings / credentials / index_config
+	Type        string // raw schema type (string / boolean / integer / number / array / ...)
+	Secret      bool
+	Required    bool
+	Title       string
+	Description string
+	Default     any
+	Enum        []string
+}
+
+// normalizeConfigSchema parses a partitioned config_schema into neutral field
+// descriptors. sections lists the sections to include. Title falls back
+// uniformly: title > description > key. Credentials fields are forced secret.
+func normalizeConfigSchema(schema map[string]any, sections ...string) []SchemaFieldDescriptor {
+	if len(schema) == 0 {
+		return nil
+	}
+	var out []SchemaFieldDescriptor
+	for _, section := range sections {
 		props, required := schemaSection(schema, section)
 		keys := make([]string, 0, len(props))
 		for key := range props {
@@ -32,39 +72,39 @@ func configFieldsFromSchema(schema map[string]any, reserved map[string]struct{})
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			if _, isReserved := reserved[key]; isReserved {
-				continue
-			}
 			property, _ := props[key].(map[string]any)
 			if property == nil {
 				continue
 			}
 			title, _ := property["title"].(string)
 			description, _ := property["description"].(string)
+			if title == "" {
+				title = description
+			}
+			if title == "" {
+				title = key
+			}
 			jsonType, _ := property["type"].(string)
 			secret, _ := property["secret"].(bool)
-			if forceSecret {
+			if section == "credentials" {
 				secret = true
 			}
 			enum, _ := property["enum"].([]any)
 			_, isRequired := required[key]
-			if title == "" {
-				title = description
-			}
-			fields = append(fields, types.WebSearchProviderConfigField{
+			out = append(out, SchemaFieldDescriptor{
 				Key:         key,
-				Label:       title,
-				Type:        configFieldType(jsonType, secret, len(enum) > 0),
+				Section:     section,
+				Type:        jsonType,
+				Secret:      secret,
 				Required:    isRequired,
-				Default:     configFieldDefaultString(property["default"]),
+				Title:       title,
 				Description: description,
-				Options:     configEnumOptions(enum),
+				Default:     property["default"],
+				Enum:        toStringSlice(enum),
 			})
 		}
 	}
-	appendSection("settings", false)
-	appendSection("credentials", true)
-	return fields
+	return out
 }
 
 // configFieldType 把一个类型声明归一化为前端的渲染意图。enum 永远优先（渲染为
@@ -87,14 +127,13 @@ func configFieldType(declaredType string, secret bool, hasEnum bool) string {
 	return "string"
 }
 
-func configEnumOptions(values []any) []types.WebSearchProviderConfigFieldOption {
+func stringEnumOptions(values []string) []types.WebSearchProviderConfigFieldOption {
 	if len(values) == 0 {
 		return nil
 	}
 	options := make([]types.WebSearchProviderConfigFieldOption, 0, len(values))
 	for _, value := range values {
-		text := fmt.Sprint(value)
-		options = append(options, types.WebSearchProviderConfigFieldOption{Label: text, Value: text})
+		options = append(options, types.WebSearchProviderConfigFieldOption{Label: value, Value: value})
 	}
 	return options
 }

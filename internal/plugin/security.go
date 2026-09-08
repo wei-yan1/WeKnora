@@ -86,14 +86,28 @@ func (g *NetworkGuard) Check(ctx context.Context, rawURL string) error {
 			port = "80"
 		}
 	}
+	if _, err := g.authorize(ctx, host, port); err != nil {
+		return err
+	}
+	g.record(rawURL, true, "allowed")
+	return nil
+}
+
+// authorize validates the host/port against policy, blocked-host and allowlist
+// rules, then resolves and validates the IPs. It returns the authorized IPs so
+// callers can dial them directly (resolve-once), closing the DNS-rebinding
+// TOCTOU window where a hostile resolver returns a public IP to the check and a
+// private IP to the dial.
+func (g *NetworkGuard) authorize(ctx context.Context, host, port string) ([]net.IP, error) {
+	dest := net.JoinHostPort(host, port)
 	if g.Policy == NetworkNone {
-		return g.block(rawURL, "manifest network policy is none")
+		return nil, g.block(dest, "manifest network policy is none")
 	}
-	if isBlockedHost(host) {
-		return g.block(rawURL, "destination is loopback, private, link-local or metadata address")
+	if pluginapi.IsForbiddenHost(host) {
+		return nil, g.block(dest, "destination is loopback, private, link-local or metadata address")
 	}
-	if g.Policy == NetworkAllowlist && !matchesAllowlist(g.Allowlist, host, port) {
-		return g.block(rawURL, "destination is not in manifest allowlist")
+	if g.Policy == NetworkAllowlist && !pluginapi.MatchAllowlist(g.Allowlist, host, port) {
+		return nil, g.block(dest, "destination is not in manifest allowlist")
 	}
 	resolver := g.Resolver
 	if resolver == nil {
@@ -103,29 +117,43 @@ func (g *NetworkGuard) Check(ctx context.Context, rawURL string) error {
 	}
 	addresses, err := resolver(ctx, host)
 	if err != nil {
-		return g.block(rawURL, "DNS resolution failed")
+		return nil, g.block(dest, "DNS resolution failed")
 	}
 	for _, address := range addresses {
-		if address.IsLoopback() || address.IsPrivate() || address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() {
-			return g.block(rawURL, "DNS resolved to a private or link-local address")
+		if pluginapi.IsForbiddenIP(address) {
+			return nil, g.block(dest, "DNS resolved to a private or link-local address")
 		}
 	}
-	g.record(rawURL, true, "allowed")
-	return nil
+	return addresses, nil
 }
 
 func (g *NetworkGuard) HTTPClient(ctx context.Context) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	baseDialer := &net.Dialer{Timeout: 10 * time.Second}
 	transport.DialContext = func(dialCtx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
 			return nil, err
 		}
-		if err := g.Check(dialCtx, "http://"+net.JoinHostPort(host, port)); err != nil {
+		ips, err := g.authorize(dialCtx, host, port)
+		if err != nil {
 			return nil, err
 		}
-		return baseDialer.DialContext(dialCtx, network, address)
+		// resolve-once: dial only the already-authorized IPs, never re-resolving
+		// the hostname. TLS ServerName is still taken from the request URL by
+		// http.Transport, so certificate validation is unaffected.
+		dialer := &net.Dialer{Timeout: 10 * time.Second}
+		var lastErr error
+		for _, ip := range ips {
+			conn, dialErr := dialer.DialContext(dialCtx, network, net.JoinHostPort(ip.String(), port))
+			if dialErr == nil {
+				return conn, nil
+			}
+			lastErr = dialErr
+		}
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("no addresses resolved for %q", host)
 	}
 	return &http.Client{Transport: transport}
 }
@@ -138,27 +166,6 @@ func (g *NetworkGuard) record(destination string, allowed bool, reason string) {
 	if g.Audit != nil {
 		g.Audit.Record(AuditEvent{PluginID: g.PluginID, Action: "network", Destination: destination, Allowed: allowed, Reason: reason, At: time.Now().UTC()})
 	}
-}
-
-func isBlockedHost(host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	if host == "localhost" || host == "metadata.google.internal" || host == "169.254.169.254" {
-		return true
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
-	}
-	return strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".internal")
-}
-
-func matchesAllowlist(values []string, host, port string) bool {
-	for _, value := range values {
-		value = strings.ToLower(strings.TrimSpace(value))
-		if value == host || value == host+":"+port || strings.HasPrefix(value, "*.") && strings.HasSuffix(host, strings.TrimPrefix(value, "*")) {
-			return true
-		}
-	}
-	return false
 }
 
 // ParseAuditLine parses a single stderr line emitted by the plugin SDK. It

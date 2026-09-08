@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"sort"
-	"strings"
 	"sync"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -73,7 +71,6 @@ func RegisterExternalRetriever(
 	manager *Manager,
 	manifest Manifest,
 	runtime Runtime,
-	_ bool, // lazyStart: kept for signature parity with other adapters; loader owns Start
 ) (types.RetrieverEngineType, error) {
 	if registry == nil {
 		return "", fmt.Errorf("retriever provider registry is nil")
@@ -118,14 +115,12 @@ func RegisterExternalRetriever(
 	// stable route so the frontend can <img> it without knowing the plugin dir;
 	// an http(s) URL is passed through as-is.
 	iconURL := ""
-	if rawIcon, _ := manifest.Metadata["icon"].(string); strings.TrimSpace(rawIcon) != "" {
-		rawIcon = strings.TrimSpace(rawIcon)
-		if iconFile, isLocal := resolveLocalIconFile(manifest.SourceDir, rawIcon); isLocal {
-			types.RegisterExternalVectorStoreIconFile(engineType, iconFile)
-			iconURL = retrieverStoreIconURL(engineTypeStr)
-		} else {
-			iconURL = rawIcon
-		}
+	if registerPluginIconFile(manifest.SourceDir, manifest, func(iconFile string) {
+		types.RegisterExternalVectorStoreIconFile(engineType, iconFile)
+	}) {
+		iconURL = retrieverStoreIconURL(engineTypeStr)
+	} else if icon := manifestIconValue(manifest); icon != "" {
+		iconURL = icon
 	}
 
 	types.RegisterExternalVectorStoreType(types.VectorStoreTypeInfo{
@@ -146,7 +141,15 @@ func RegisterExternalRetriever(
 				return nil, "", 0, fmt.Errorf("acquire retriever invocation: %w", err)
 			}
 			defer lease.Close()
-			client := pluginapi.NewRetrieverPluginClient(provider.Conn())
+			// The started flag can transiently disagree with the runtime (e.g. a
+			// failed restart leaves started=true while Stop already tore the
+			// connection down). A nil conn here would panic inside grpc — return a
+			// caller-facing error instead, mirroring the search/model factories.
+			conn := provider.Conn()
+			if conn == nil {
+				return nil, "", 0, fmt.Errorf("retriever plugin %q is not running", pluginID)
+			}
+			client := pluginapi.NewRetrieverPluginClient(conn)
 			// Fetch score semantics lazily on first open: the plugin is running
 			// by now (the loader starts it after registration), so Describe
 			// succeeds here where it could not at registration time. The result
@@ -194,44 +197,25 @@ func retrieverStoreIconURL(engineType string) string {
 // host. settings + credentials become connection fields (credentials marked
 // sensitive); index_config becomes index fields.
 func configSchemaToVectorStoreFields(schema map[string]any) (connection, index []types.VectorStoreFieldInfo) {
-	appendSection := func(section string, sensitive bool) []types.VectorStoreFieldInfo {
-		props, required := schemaSection(schema, section)
-		keys := make([]string, 0, len(props))
-		for key := range props {
-			keys = append(keys, key)
+	// 复用统一的 schema 归一化：title 的 fallback 规则与 WebSearch/Model/Parser
+	// 一致（title > description > key），不再各自维护一份解析逻辑。
+	for _, d := range normalizeConfigSchema(schema, "settings", "credentials", "index_config") {
+		field := types.VectorStoreFieldInfo{
+			Name:        d.Key,
+			Type:        vectorStoreFieldType(d.Type),
+			Title:       d.Title,
+			Required:    d.Required,
+			Sensitive:   d.Secret,
+			Default:     d.Default,
+			Description: d.Description,
+			Enum:        d.Enum,
 		}
-		sort.Strings(keys)
-		var out []types.VectorStoreFieldInfo
-		for _, key := range keys {
-			property, _ := props[key].(map[string]any)
-			if property == nil {
-				continue
-			}
-			jsonType, _ := property["type"].(string)
-			secret, _ := property["secret"].(bool)
-			if sensitive {
-				secret = true
-			}
-			enum, _ := property["enum"].([]any)
-			description, _ := property["description"].(string)
-			title, _ := property["title"].(string)
-			_, isRequired := required[key]
-			out = append(out, types.VectorStoreFieldInfo{
-				Name:        key,
-				Type:        vectorStoreFieldType(jsonType),
-				Title:       title,
-				Required:    isRequired,
-				Sensitive:   secret,
-				Default:     property["default"],
-				Description: description,
-				Enum:        toStringSlice(enum),
-			})
+		if d.Section == "index_config" {
+			index = append(index, field)
+		} else {
+			connection = append(connection, field)
 		}
-		return out
 	}
-	connection = appendSection("settings", false)
-	connection = append(connection, appendSection("credentials", true)...)
-	index = appendSection("index_config", false)
 	return connection, index
 }
 
@@ -269,8 +253,16 @@ type retrieverAdapter struct {
 func (retrieverAdapter) ExtensionType() string { return ExtensionRetriever }
 
 func (a retrieverAdapter) Register(manager *Manager, manifest Manifest, runtime Runtime) (adapterHandle, error) {
-	engineType, err := RegisterExternalRetriever(a.registry, manager, manifest, runtime, false)
+	engineType, err := RegisterExternalRetriever(a.registry, manager, manifest, runtime)
 	return adapterHandle{retrieverEngine: string(engineType)}, err
+}
+
+func (retrieverAdapter) HandleFromManifest(manifest Manifest) adapterHandle {
+	h := adapterHandle{}
+	if v, _ := manifest.Metadata["engine_type"].(string); v != "" {
+		h.retrieverEngine = v
+	}
+	return h
 }
 
 func (a retrieverAdapter) Unregister(h adapterHandle) {

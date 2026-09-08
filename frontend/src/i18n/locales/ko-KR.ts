@@ -583,6 +583,7 @@ export default {
     connectionFailed: '연결 실패',
     isRequired: '은(는) 필수입니다',
     credentialsLabel: '자격 증명',
+    pluginSettingsLabel: '플러그인 설정',
     gitlab: {
       baseUrl: 'GitLab URL', accessToken: '개인 액세스 토큰', projects: 'GitLab 프로젝트',
       projectsHint: '프로젝트 ID 또는 네임스페이스 경로(예: group/project)를 입력하고, 필요에 따라 브랜치와 디렉터리를 지정하세요.',

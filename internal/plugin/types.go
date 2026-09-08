@@ -4,7 +4,11 @@ package plugin
 // extensions. Connector-specific protocols are deliberately kept out of this
 // package so the lifecycle manager can manage every extension type uniformly.
 
-import "time"
+import (
+	"time"
+
+	"github.com/Tencent/WeKnora/internal/types"
+)
 
 const (
 	APIVersionV1        = "weknora.plugin/v1"
@@ -23,7 +27,6 @@ type NetworkPolicy string
 
 const (
 	NetworkNone      NetworkPolicy = "none"
-	NetworkEgress    NetworkPolicy = "egress"
 	NetworkAllowlist NetworkPolicy = "allowlist"
 )
 
@@ -69,10 +72,29 @@ type Manifest struct {
 	Capabilities []string       `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
 	Metadata     map[string]any `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 
+	// ModelUI is the model-plugin-only UI declaration. It declares additive
+	// capabilities (features) and the display policy of host-owned common
+	// fields (host_fields). It is only meaningful for extension_type=model.
+	ModelUI *ModelUI `json:"model_ui,omitempty" yaml:"model_ui,omitempty"`
+
 	// SourceDir is the directory containing the plugin manifest, populated by
 	// discovery. It is never serialized to/from the manifest file and is used by
 	// the host to resolve plugin-local assets (e.g. the connector icon).
 	SourceDir string `json:"-" yaml:"-"`
+}
+
+// ModelUI carries the model-plugin UI declaration from the manifest. It is
+// surfaced to the frontend (via /models/providers) so the model editor can
+// render a plugin-specific form without any host-side hardcoding.
+type ModelUI struct {
+	// Features declares additive model capabilities that are not themselves a
+	// model type (e.g. "thinking", "streaming", "vision", "tools"). They drive
+	// capability badges and the visibility of feature toggles in the editor.
+	Features []string `json:"features,omitempty" yaml:"features,omitempty"`
+	// HostFields declares the display policy of host-owned common fields
+	// (base_url / api_key / custom_headers / supports_vision / max_concurrency).
+	// Keys use snake_case, matching the config_schema convention.
+	HostFields map[string]types.HostFieldSpec `json:"host_fields,omitempty" yaml:"host_fields,omitempty"`
 }
 
 type HealthState string

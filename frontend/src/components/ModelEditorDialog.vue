@@ -349,16 +349,27 @@
             <t-input v-model="formData.modelName" :placeholder="getModelNamePlaceholder()" />
           </div>
 
-          <!-- Base URL（保留 key，DS 等插件声明 base_url） -->
+          <!-- 显示名称（可选） -->
           <div class="form-item">
-            <label class="form-label">{{ $t('model.editor.baseUrlLabel') }}</label>
+            <label class="form-label">{{ $t('model.editor.displayNameLabel') }}</label>
+            <t-input v-model="formData.displayName" :placeholder="$t('model.editor.displayNamePlaceholder')" />
+            <p class="form-desc">{{ $t('model.editor.displayNameDesc') }}</p>
+          </div>
+
+          <!-- Base URL（按 host_fields.base_url 声明显示/必填） -->
+          <div v-if="hostFieldVisible('base_url')" class="form-item">
+            <label class="form-label" :class="{ required: hostFieldRequired('base_url') }">
+              {{ $t('model.editor.baseUrlLabel') }}
+            </label>
             <t-input v-model="formData.baseUrl" :placeholder="getBaseUrlPlaceholder()" />
             <p class="form-desc">{{ $t('model.editor.pluginBaseUrlDesc') }}</p>
           </div>
 
-          <!-- API Key（保留 key，凭证走 /credentials 子资源） -->
-          <div class="form-item">
-            <label class="form-label">{{ $t('model.editor.apiKeyOptional') }}</label>
+          <!-- API Key（按 host_fields.api_key 声明显示/必填，凭证走 /credentials 子资源） -->
+          <div v-if="hostFieldVisible('api_key')" class="form-item">
+            <label class="form-label" :class="{ required: hostFieldRequired('api_key') }">
+              {{ $t('model.editor.apiKeyOptional') }}
+            </label>
             <CredentialResource v-if="isEdit && props.modelData?.id" :api="credentialApi" :fields="credentialFields"
               :meta="credentialMeta" />
             <t-input v-else v-model="formData.apiKey" :type="showApiKey ? 'text' : 'password'"
@@ -369,6 +380,30 @@
                   :aria-label="showApiKey ? 'Hide' : 'Show'" @click.stop="showApiKey = !showApiKey" />
               </template>
             </t-input>
+          </div>
+
+          <!-- 自定义 HTTP Header（按 host_fields.custom_headers 声明显示） -->
+          <div v-if="hostFieldVisible('custom_headers')" class="form-item">
+            <div class="custom-headers-header">
+              <label class="form-label" style="margin-bottom: 0;">{{ $t('model.editor.customHeadersLabel') }}</label>
+              <t-button variant="text" size="small" theme="primary" @click="addCustomHeader">
+                <template #icon><t-icon name="add" /></template>
+                {{ $t('model.editor.customHeadersAdd') }}
+              </t-button>
+            </div>
+            <p class="form-desc custom-headers-desc">{{ $t('model.editor.customHeadersDesc') }}</p>
+            <div v-if="formData.customHeaders && formData.customHeaders.length > 0" class="custom-headers-list">
+              <div v-for="(item, idx) in formData.customHeaders" :key="idx" class="custom-header-row">
+                <t-input v-model="item.key" :placeholder="$t('model.editor.customHeadersKeyPlaceholder')"
+                  class="custom-header-key" />
+                <t-input v-model="item.value" :placeholder="$t('model.editor.customHeadersValuePlaceholder')"
+                  class="custom-header-value" />
+                <t-button variant="text" shape="square" size="small" class="custom-header-remove"
+                  @click="removeCustomHeader(idx)" :aria-label="$t('common.delete')">
+                  <t-icon name="close" />
+                </t-button>
+              </div>
+            </div>
           </div>
 
           <!-- 插件动态配置字段（config_fields，跳过保留 key） -->
@@ -414,7 +449,7 @@
         </div>
 
         <!-- Chat: supports vision toggle (VLLM models are inherently multimodal) -->
-        <div v-if="activeModelType === 'chat'" class="form-item">
+        <div v-if="activeModelType === 'chat' && hostFieldVisible('supports_vision')" class="form-item">
           <label class="form-label">{{ $t('model.editor.supportsVisionLabel') }}</label>
           <div class="vision-toggle">
             <t-switch v-model="formData.supportsVision" />
@@ -452,7 +487,7 @@
           are gated by the governor (see internal/models/limiter), so we surface
           it just for those three. 0 = fall back to the global default.
         -->
-        <div class="form-item">
+        <div v-if="hostFieldVisible('max_concurrency')" class="form-item">
           <label class="form-label">{{ $t('model.editor.maxConcurrencyLabel') }}</label>
           <t-input v-model.number="formData.maxConcurrency" type="number" :min="0" :max="4096"
             :placeholder="$t('model.editor.maxConcurrencyPlaceholder')" />
@@ -792,13 +827,49 @@ const currentPluginConfigFields = computed(() => {
   return provider?.configFields || []
 })
 
+// 当前选中 plugin provider 的完整声明（含 hostFields）。
+const currentPluginProvider = computed(() =>
+  pluginProviderOptions.value.find(p => p.value === formData.value.provider),
+)
+
+// 当前插件声明的宿主公共字段显示策略（base_url / api_key / custom_headers / ...）。
+const currentPluginHostFields = computed(() =>
+  currentPluginProvider.value?.hostFields || {},
+)
+
+// 当前插件声明的附加能力（thinking / streaming / vision / tools）。
+const currentPluginFeatures = computed(() =>
+  currentPluginProvider.value?.features || [],
+)
+
+// 读取某宿主公共字段在当前 provider 下的 mode。仅 source=plugin 生效；
+// 其余 source 返回 undefined，沿用原有硬编码显隐逻辑，保证内置 provider 零回归。
+const hostFieldMode = (key: string): string | undefined => {
+  if (formData.value.source !== 'plugin') return undefined
+  return currentPluginHostFields.value[key]?.mode
+}
+
+// 字段是否可见：非 plugin 源恒可见（沿用原逻辑）；plugin 源按 mode 判断，
+// 未声明时默认可见（向后兼容已有插件）。
+const hostFieldVisible = (key: string): boolean => {
+  if (formData.value.source !== 'plugin') return true
+  return hostFieldMode(key) !== 'hidden'
+}
+
+// 字段是否必填：仅 plugin 源按 mode=required 判断。
+const hostFieldRequired = (key: string): boolean => hostFieldMode(key) === 'required'
+
 const dialogVisible = computed({
   get: () => props.visible,
   set: (val) => emit('update:visible', val)
 })
 
+// 思考模式参数格式：chat + 远程 API 恒显示；外部插件仅当其声明 features.thinking 时显示。
 const showThinkingControlField = computed(() =>
-  activeModelType.value === 'chat' && formData.value.source === 'remote',
+  activeModelType.value === 'chat' && (
+    formData.value.source === 'remote' ||
+    currentPluginFeatures.value.includes('thinking')
+  ),
 )
 
 const resolvedThinkingControl = (): ThinkingControlValue =>
@@ -823,7 +894,7 @@ const syncThinkingControlToForm = (force = false) => {
 }
 
 const applyThinkingControlFromModelData = () => {
-  if (!props.modelData || activeModelType.value !== 'chat' || formData.value.source !== 'remote') return
+  if (!props.modelData || activeModelType.value !== 'chat' || !showThinkingControlField.value) return
   thinkingControlManual.value = !!props.modelData.thinkingControl
   formData.value.thinkingControl = resolveThinkingControl(
     props.modelData.thinkingControl,
@@ -1296,6 +1367,14 @@ const handleProviderChange = (value: string) => {
       }
     }
     formData.value.extraConfig = { ...defaults, ...(formData.value.extraConfig || {}) }
+
+    // host_fields 声明的公共字段默认值（如 base_url.default）：
+    // 仅在当前 baseUrl 为空时注入，避免覆盖用户已填或已回显的值。
+    const hostFields = provider.hostFields || {}
+    const baseUrlDefault = hostFields.base_url?.default
+    if (baseUrlDefault != null && baseUrlDefault !== '' && !formData.value.baseUrl?.trim()) {
+      formData.value.baseUrl = String(baseUrlDefault)
+    }
   }
 
   // WeKnoraCloud: 检查凭证状态

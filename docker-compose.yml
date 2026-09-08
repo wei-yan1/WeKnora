@@ -42,6 +42,16 @@ services:
       - ./config/config.yaml:/app/config/config.yaml
       # Optional: mount custom skills directory (allows adding skills without rebuilding image)
       - ./skills/preloaded:/app/skills/preloaded
+      # 外部插件目录（ProcessRuntime：offline/trusted）。按扩展类型放宿主 /mnt/d/weknora-plugins/<type>/ 下，
+      # 二进制须为 Linux/amd64 且可执行。挂载目标与 .env 中 WEKNORA_PLUGIN_DIR_* 的 /mnt/d/ 路径保持一致。
+      - /mnt/d/weknora-plugins:/mnt/d/weknora-plugins:ro
+      # 插件 runtime 共享目录（app 只读）：isolated 插件容器由 plugin-runtime agent 启动，
+      # app 从这里连接 agent 的 Unix socket 与插件的 control socket。
+      # 必须是宿主 bind 且三端（app/agent/docker daemon）使用同一字面路径：agent 会把
+      # 该路径字面地交给 docker daemon 作为 bind source，daemon 只在宿主文件系统上解析；
+      # named volume 的容器内路径 daemon 不可见，插件 socket 会建到宿主自动创建的目录里，
+      # agent 与 app 永远看不见。另注意不能用 /mnt/d（DrvFs 不支持 unix socket）。
+      - ${WEKNORA_PLUGIN_RUNTIME_HOST_DIR:-/var/lib/weknora/plugin-runtime}:/var/lib/weknora/plugin-runtime:ro
       # Optional: declarative built-in models. Copy config/builtin_models.yaml.example
       # to config/builtin_models.yaml, edit it for your deployment, then
       # uncomment the line below. See docs/BUILTIN_MODELS.md.
@@ -310,6 +320,21 @@ services:
       - WEKNORA_HOUSEKEEPING_ENABLED=${WEKNORA_HOUSEKEEPING_ENABLED:-}
       # 自定义 Skills 目录（挂载后指定，免重建镜像）
       - WEKNORA_SKILLS_DIR=${WEKNORA_SKILLS_DIR:-}
+      # ========== 外部插件（ProcessRuntime：offline/trusted）==========
+      # 目录在 ./plugins 挂载为 /app/plugins；某类没插件时在 .env 里把对应变量置空即可。
+      - WEKNORA_PLUGIN_DIR_DATASOURCE=${WEKNORA_PLUGIN_DIR_DATASOURCE-/app/plugins/datasource}
+      - WEKNORA_PLUGIN_DIR_PARSER=${WEKNORA_PLUGIN_DIR_PARSER-/app/plugins/parser}
+      - WEKNORA_PLUGIN_DIR_SEARCH=${WEKNORA_PLUGIN_DIR_SEARCH-/app/plugins/search}
+      - WEKNORA_PLUGIN_DIR_MODEL=${WEKNORA_PLUGIN_DIR_MODEL-/app/plugins/model}
+      - WEKNORA_PLUGIN_DIR_RETRIEVER=${WEKNORA_PLUGIN_DIR_RETRIEVER-/app/plugins/retriever}
+      # ========== 外部插件 isolated（DockerRuntime）→ runtime-agent ==========
+      # app 不挂 docker.sock、不装 docker CLI；isolated 插件容器由 plugin-runtime
+      # agent 启动，app 只通过共享宿主目录上的 Unix socket 调用它。三端统一使用
+      # 同一字面路径（HOST_DIR），无需再做 ROOT→LOCAL_ROOT 路径重定位。
+      - WEKNORA_PLUGIN_RUNTIME_AGENT_SOCKET=/var/lib/weknora/plugin-runtime/agent.sock
+      - WEKNORA_PLUGIN_RUNTIME_ROOT=/var/lib/weknora/plugin-runtime
+      - WEKNORA_PLUGIN_RUNTIME_LOCAL_ROOT=/var/lib/weknora/plugin-runtime
+      - WEKNORA_PLUGIN_RUNTIME_AGENT_TOKEN=${WEKNORA_PLUGIN_RUNTIME_AGENT_TOKEN:-weknora-dev-token}
       - WEKNORA_CHAT_ATTACHMENT_TTL_HOURS=${WEKNORA_CHAT_ATTACHMENT_TTL_HOURS:-24}
       - WEKNORA_CHAT_ATTACHMENT_WAIT_TIMEOUT_SEC=${WEKNORA_CHAT_ATTACHMENT_WAIT_TIMEOUT_SEC:-60}
       - WEKNORA_CHAT_ATTACHMENT_OCR_CONCURRENCY=${WEKNORA_CHAT_ATTACHMENT_OCR_CONCURRENCY:-8}
@@ -359,11 +384,51 @@ services:
         condition: service_healthy
       docreader:
         condition: service_healthy
+      plugin-runtime:
+        condition: service_healthy
     networks:
       - WeKnora-network
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+  # Plugin Runtime Agent：唯一持有 Docker 权限的组件。负责启动/停止 isolated(OCCI)
+  # 插件容器及其 egress 代理，并在共享卷上暴露一个窄 start/stop Unix socket API。
+  # app 容器不直接接触 docker.sock。
+  plugin-runtime:
+    image: wechatopenai/weknora-plugin-runtime-agent:${WEKNORA_VERSION:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.agent
+      args:
+        - GOPROXY_ARG=${GOPROXY_ARG:-}
+    container_name: WeKnora-plugin-runtime
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # agent/daemon/app 必须共享同一宿主字面路径：agent 把该路径字面地交给
+      # docker daemon 作为插件容器的 bind source，daemon 只按宿主路径解析。
+      - ${WEKNORA_PLUGIN_RUNTIME_HOST_DIR:-/var/lib/weknora/plugin-runtime}:/var/lib/weknora/plugin-runtime
+    environment:
+      - WEKNORA_PLUGIN_RUNTIME_ROOT=/var/lib/weknora/plugin-runtime
+      - WEKNORA_PLUGIN_RUNTIME_AGENT_SOCKET=/var/lib/weknora/plugin-runtime/agent.sock
+      # 生产必须设置强随机 token（app 与 agent 共用）；默认值仅用于本地开箱体验。
+      - WEKNORA_PLUGIN_RUNTIME_AGENT_TOKEN=${WEKNORA_PLUGIN_RUNTIME_AGENT_TOKEN:-weknora-dev-token}
+      # 镜像策略：development 允许任意 tag（本地开发）；生产去掉 development 并设置
+      # WEKNORA_PLUGIN_IMAGE_ALLOWLIST（JSON: {"plugin_id":"image@sha256:..."}）。
+      - WEKNORA_PLUGIN_IMAGE_POLICY=${WEKNORA_PLUGIN_IMAGE_POLICY:-development}
+      - WEKNORA_PLUGIN_IMAGE_ALLOWLIST=${WEKNORA_PLUGIN_IMAGE_ALLOWLIST:-}
+      # 留空则 agent 自动用 COMPOSE_PROJECT_NAME/容器 hostname 作为唯一实例 ID，
+      # 避免多套部署共用 Docker daemon 时互相清理对方的插件容器。
+      - WEKNORA_PLUGIN_RUNTIME_INSTANCE_ID=${WEKNORA_PLUGIN_RUNTIME_INSTANCE_ID:-}
+    healthcheck:
+      test: ["CMD", "test", "-S", "/var/lib/weknora/plugin-runtime/agent.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks:
+      - WeKnora-network
+    restart: unless-stopped
 
   # Sandbox 镜像：仅用于 build/pull，非常驻服务；app 执行 Skills 时按需 docker run 该镜像，用毕即释
   sandbox:

@@ -175,13 +175,14 @@ func (r *ConnectorRegistry) List() []string {
 
 // ConnectorMetadata provides metadata about available connectors
 type ConnectorMetadata struct {
-	Type         string         `json:"type"`
-	Name         string         `json:"name"`
-	Description  string         `json:"description"`
-	Icon         string         `json:"icon,omitempty"`
-	Priority     int            `json:"priority"` // Priority order for UI display (lower = higher priority)
-	AuthType     string         `json:"auth_type"` // "oauth2", "api_key", "token", etc.
-	Capabilities []string       `json:"capabilities"` // "incremental", "webhook", "deletion_sync", etc.
+	Type         string   `json:"type"`
+	Name         string   `json:"name"`
+	Description  string   `json:"description"`
+	Icon         string   `json:"icon,omitempty"`
+	DocsURL      string   `json:"docs_url,omitempty"`
+	Priority     int      `json:"priority"`     // Priority order for UI display (lower = higher priority)
+	AuthType     string   `json:"auth_type"`    // "oauth2", "api_key", "token", etc.
+	Capabilities []string `json:"capabilities"` // "incremental", "webhook", "deletion_sync", etc.
 	// ConfigSchema is the JSON-Schema for the connector's config envelope
 	// (settings/credentials). Populated for external plugins so the frontend can
 	// render a generic form; empty for built-in connectors that keep their

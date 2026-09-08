@@ -705,6 +705,10 @@ type ModelProviderDTO struct {
 	Source string `json:"source,omitempty"`
 	// ConfigFields 是插件声明的非保留配置字段，前端据此动态渲染表单。
 	ConfigFields []types.WebSearchProviderConfigField `json:"configFields,omitempty"`
+	// Features 是插件声明的附加模型能力（thinking / streaming / vision / tools）。
+	Features []string `json:"features,omitempty"`
+	// HostFields 是插件声明的宿主公共字段显示策略（hidden/optional/required/readonly）。
+	HostFields map[string]types.HostFieldSpec `json:"hostFields,omitempty"`
 }
 
 // modelTypeToFrontend 将后端 ModelType 转换为前端兼容的字符串
@@ -810,6 +814,8 @@ func (h *ModelHandler) ListModelProviders(c *gin.Context) {
 			Source:       "plugin",
 			ConfigFields: ext.ConfigFields,
 			ModelTypes:   ext.Capabilities,
+			Features:     ext.Features,
+			HostFields:   ext.HostFields,
 		})
 	}
 

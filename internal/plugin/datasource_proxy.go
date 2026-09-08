@@ -19,12 +19,22 @@ import (
 type GRPCConnectorProxy struct {
 	ConnectorType     string
 	Client            pluginapi.DataSourcePluginClient
-	StreamingClient   pluginapi.DataSourceStreamingPluginClient
 	ConfigSchema      map[string]any
 	Invocation        pluginapi.InvocationContext
 	RuntimeGeneration uint64
 	RuntimeContext    context.Context
 	GenerationValid   func(uint64) bool
+}
+
+// GRPCStreamingConnectorProxy is a GRPCConnectorProxy that additionally
+// implements datasource.StreamingConnector (FetchStream). It is only
+// constructed for plugins that declare the "streaming" capability in their
+// manifest, so a unary-only plugin is never routed down the streaming sync
+// path — which would otherwise drop its incremental cursor through the SDK's
+// unary fallback and force a full re-sync on every manual run.
+type GRPCStreamingConnectorProxy struct {
+	*GRPCConnectorProxy
+	StreamingClient pluginapi.DataSourceStreamingPluginClient
 }
 
 func (p *GRPCConnectorProxy) Type() string { return p.ConnectorType }
@@ -191,7 +201,7 @@ func (p *GRPCConnectorProxy) FetchIncremental(ctx context.Context, config *types
 // existing WeKnora StreamHandler. Each response cursor is a durable progress
 // boundary. Unary-only plugins remain supported through a bounded fallback
 // that emits all returned items and checkpoints once at the end.
-func (p *GRPCConnectorProxy) FetchStream(ctx context.Context, config *types.DataSourceConfig, cursor *types.SyncCursor, h datasource.StreamHandler) (*types.SyncCursor, error) {
+func (p *GRPCStreamingConnectorProxy) FetchStream(ctx context.Context, config *types.DataSourceConfig, cursor *types.SyncCursor, h datasource.StreamHandler) (*types.SyncCursor, error) {
 	ctx, cleanup, err := p.invocationContext(ctx)
 	if err != nil {
 		return nil, err
@@ -278,7 +288,7 @@ func (p *GRPCConnectorProxy) FetchStream(ctx context.Context, config *types.Data
 	return next, nil
 }
 
-func (p *GRPCConnectorProxy) fetchUnaryStreamFallback(ctx context.Context, config *types.DataSourceConfig, cursor *types.SyncCursor) ([]types.FetchedItem, *types.SyncCursor, error) {
+func (p *GRPCStreamingConnectorProxy) fetchUnaryStreamFallback(ctx context.Context, config *types.DataSourceConfig, cursor *types.SyncCursor) ([]types.FetchedItem, *types.SyncCursor, error) {
 	if cursor == nil {
 		items, err := p.FetchAll(ctx, config, nil)
 		return items, nil, err

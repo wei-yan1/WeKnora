@@ -1,6 +1,8 @@
 package plugin
 
 import (
+	"strings"
+
 	"github.com/Tencent/WeKnora/internal/datasource"
 	infraWebSearch "github.com/Tencent/WeKnora/internal/infrastructure/web_search"
 )
@@ -12,6 +14,12 @@ import (
 type ExtensionAdapter interface {
 	ExtensionType() string
 	Register(manager *Manager, manifest Manifest, runtime Runtime) (adapterHandle, error)
+	// HandleFromManifest derives the unregister handle for a plugin from its
+	// manifest alone. It exists so the loader can unregister a previously
+	// loaded plugin (e.g. on rescan/reload) without keeping cross-call state:
+	// the derivation rule for a registration name is extension-type specific and
+	// therefore lives on the adapter, not in a central switch in the loader.
+	HandleFromManifest(manifest Manifest) adapterHandle
 	Unregister(handle adapterHandle)
 }
 
@@ -64,8 +72,16 @@ type datasourceAdapter struct {
 func (datasourceAdapter) ExtensionType() string { return ExtensionDataSource }
 
 func (a datasourceAdapter) Register(manager *Manager, manifest Manifest, runtime Runtime) (adapterHandle, error) {
-	connectorType, err := registerExternalDataSource(manager, a.registry, manifest, runtime, false, manifest.SourceDir)
+	connectorType, err := registerExternalDataSource(manager, a.registry, manifest, runtime, manifest.SourceDir)
 	return adapterHandle{connectorType: connectorType}, err
+}
+
+func (datasourceAdapter) HandleFromManifest(manifest Manifest) adapterHandle {
+	h := adapterHandle{connectorType: manifest.ID}
+	if v, ok := manifest.Metadata["connector_type"].(string); ok && v != "" {
+		h.connectorType = v
+	}
+	return h
 }
 
 func (a datasourceAdapter) Unregister(h adapterHandle) {
@@ -83,10 +99,18 @@ func (parserAdapter) Register(manager *Manager, manifest Manifest, runtime Runti
 	if err != nil {
 		return adapterHandle{}, err
 	}
-	if err := RegisterExternalParser(manager, manifest, runtime, descriptor, false); err != nil {
+	if err := RegisterExternalParser(manager, manifest, runtime, descriptor); err != nil {
 		return adapterHandle{}, err
 	}
 	return adapterHandle{parserName: descriptor.EngineName}, nil
+}
+
+func (parserAdapter) HandleFromManifest(manifest Manifest) adapterHandle {
+	h := adapterHandle{parserName: manifest.ID}
+	if v, ok := manifest.Metadata["engine_name"].(string); ok && strings.TrimSpace(v) != "" {
+		h.parserName = v
+	}
+	return h
 }
 
 func (parserAdapter) Unregister(h adapterHandle) {
@@ -103,6 +127,14 @@ func (modelAdapter) Register(manager *Manager, manifest Manifest, runtime Runtim
 	return adapterHandle{modelProvider: providerName}, err
 }
 
+func (modelAdapter) HandleFromManifest(manifest Manifest) adapterHandle {
+	h := adapterHandle{modelProvider: manifest.ID}
+	if v, ok := manifest.Metadata["provider"].(string); ok && strings.TrimSpace(v) != "" {
+		h.modelProvider = strings.TrimSpace(v)
+	}
+	return h
+}
+
 func (modelAdapter) Unregister(h adapterHandle) {
 	UnregisterExternalModel(h.modelProvider)
 }
@@ -115,8 +147,16 @@ type searchAdapter struct {
 func (searchAdapter) ExtensionType() string { return ExtensionSearch }
 
 func (a searchAdapter) Register(manager *Manager, manifest Manifest, runtime Runtime) (adapterHandle, error) {
-	searchType, err := RegisterExternalWebSearch(manager, a.registry, manifest, runtime, false)
+	searchType, err := RegisterExternalWebSearch(manager, a.registry, manifest, runtime)
 	return adapterHandle{searchType: searchType}, err
+}
+
+func (searchAdapter) HandleFromManifest(manifest Manifest) adapterHandle {
+	h := adapterHandle{searchType: manifest.ID}
+	if v, ok := manifest.Metadata["provider_type"].(string); ok && strings.TrimSpace(v) != "" {
+		h.searchType = strings.TrimSpace(v)
+	}
+	return h
 }
 
 func (a searchAdapter) Unregister(h adapterHandle) {

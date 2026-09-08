@@ -84,7 +84,7 @@ type RetrieverHit struct {
 type RetrieverHandler struct {
 	provider RetrieverProvider
 
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	sessions map[string]RetrieverBackend
 }
 
@@ -213,9 +213,9 @@ func (h *RetrieverHandler) Patch(ctx context.Context, v *pluginproto.RetrieverPa
 }
 
 func (h *RetrieverHandler) lookup(handle string) (RetrieverBackend, error) {
-	h.mu.Lock()
+	h.mu.RLock()
 	backend, ok := h.sessions[handle]
-	h.mu.Unlock()
+	h.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("unknown store_handle")
 	}

@@ -43,11 +43,17 @@ var externalModelResolvers sync.Map // provider name -> ModelCallResolver
 // list so the frontend can render plugin-backed providers dynamically (the same
 // paradigm as web-search provider types).
 type ExternalModelInfo struct {
-	Provider     string                              `json:"provider"`
-	Name         string                              `json:"name"`
-	Description  string                              `json:"description"`
-	Capabilities []string                            `json:"capabilities"`
+	Provider     string                               `json:"provider"`
+	Name         string                               `json:"name"`
+	Description  string                               `json:"description"`
+	Capabilities []string                             `json:"capabilities"`
 	ConfigFields []types.WebSearchProviderConfigField `json:"config_fields,omitempty"`
+	// Features declares additive model capabilities (thinking / streaming /
+	// vision / tools), surfaced to the frontend for capability badges and
+	// feature toggles.
+	Features []string `json:"features,omitempty"`
+	// HostFields declares the display policy of host-owned common fields.
+	HostFields map[string]types.HostFieldSpec `json:"host_fields,omitempty"`
 }
 
 // externalModelInfos holds the static metadata of externally loaded model

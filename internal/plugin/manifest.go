@@ -60,7 +60,7 @@ func (m Manifest) Validate(hostVersion string) error {
 		}
 	}
 	switch m.EffectiveNetworkPolicy() {
-	case NetworkNone, NetworkEgress, NetworkAllowlist:
+	case NetworkNone, NetworkAllowlist:
 	default:
 		return fmt.Errorf("%w: unsupported network policy %q", ErrManifestInvalid, m.Permissions.Network)
 	}

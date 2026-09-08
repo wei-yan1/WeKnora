@@ -136,20 +136,35 @@ metadata:
   icon: logo.png                    # 可选：插件图标（相对插件目录的文件名，或 http(s) URL）
   docs_url: https://example.com     # 可选：官方文档链接，前端渲染"查看文档"入口
 
-config:
-  - key: api_key
-    type: string
-    description: 搜索引擎 API Key
-    required: true
-    secret: true                    # 敏感字段，宿主会脱敏处理
-  - key: base_url
-    type: string
-    description: 搜索服务地址
-    required: true                  # 注意：required:false 时前端不会显示该输入框
-  - key: proxy_url
-    type: string
-    description: HTTP 代理地址
-    required: false
+config_schema:
+  type: object
+  properties:
+    settings:                       # 非敏感配置：保留 key 与自定义参数都放这里
+      type: object
+      required: [base_url]
+      properties:
+        base_url:                   # 保留 key：宿主渲染专用「Base URL」框
+          type: string
+          title: Search API URL
+        engine_id:                  # 保留 key：宿主渲染专用「Engine ID」框
+          type: string
+          title: Engine ID
+        proxy_url:                  # 保留 key：宿主渲染专用「HTTP 代理」框
+          type: string
+          title: HTTP Proxy
+        search_depth:               # 自定义参数：宿主渲染成下拉框，值经 ExtraConfig 透传
+          type: string
+          title: Search Depth
+          enum: [basic, advanced]
+          default: basic
+    credentials:                    # 敏感凭证：search 的 credentials 只允许 api_key
+      type: object
+      required: [api_key]
+      properties:
+        api_key:
+          type: string
+          title: API Key
+          secret: true              # 敏感字段；必须用 secret: true，而不是 type: secret
 
 permissions:
   network: allowlist                # 联网插件必须声明网络策略
@@ -158,16 +173,16 @@ permissions:
     - "*.example.com"
 ```
 
-### config 字段 key 名的硬约定（影响前端表单）
+### 保留 key 的硬约定（影响前端表单）
 
-宿主通过 config 字段的 **key 名**来识别 provider 管理界面里的元数据，以下四个 key 名是**硬约定**，必须恰好同名：
+宿主通过 `config_schema` 的**分区 + 字段名**来识别 provider 管理界面的元数据，以下四个字段名是**硬约定**，必须恰好同名，且放在对应分区：
 
-| key 名 | 宿主识别结果 |
-|---|---|
-| `api_key` | `RequiresAPIKey` —— 前端渲染"需要 API Key"标识 |
-| `engine_id` | `RequiresEngineID` —— 前端渲染"需要 Engine ID"标识 |
-| `base_url` | `RequiresBaseURL` —— 前端渲染"需要 Base URL"标识 |
-| `proxy_url` | `SupportsProxy` —— 前端渲染"支持代理"标识 |
+| 字段名 | 所在分区 | 宿主识别结果 |
+|---|---|---|
+| `api_key` | `credentials` | `RequiresAPIKey` —— 前端渲染"需要 API Key"标识 |
+| `engine_id` | `settings` | `RequiresEngineID` —— 前端渲染"需要 Engine ID"标识 |
+| `base_url` | `settings` | `RequiresBaseURL` —— 前端渲染"需要 Base URL"标识 |
+| `proxy_url` | `settings` | `SupportsProxy` —— 前端渲染"支持代理"标识 |
 
 不要改名（如 `apikey`、`key`、`token`）——改名后宿主不会把这些字段识别为对应能力，前端表单与参数校验都会失效。
 
@@ -175,31 +190,34 @@ permissions:
 
 - 它们**只驱动能力标志与宿主内置的专用表单区**（API 密钥框、Base URL 框、HTTP 代理框），**不会**作为自定义字段再渲染一遍输入框。
 - `required` 决定对应输入框**是否出现**：`required: true` 显示（且必填），`required: false` **完全不显示**——框架没有"可选显示"的中间态。需要一个"可留空"的 Base URL 时，请声明 `required: true` 并让用户填默认地址。
-- 其他自定义 key 也会透传给插件，但要获得**可输入的控件**请使用 `config_schema`（见下节）；`config` 列表里的 `type` 声明不会产生额外的输入控件。
+- 其他自定义字段声明在 `settings` 分区，宿主会把它们转成可输入的控件（见下节），不会重复渲染保留 key。
 
-### 扩展参数：config_schema（推荐）
+### 扩展参数（config_schema）
 
-`config` 列表只负责四个保留 key 的能力声明。插件的**自定义参数**（搜索深度、返回条数、语言等）请用 `config_schema` 声明——宿主会把它转换成前端可渲染的字段列表，参数值经请求的 `ExtraConfig` 透传给插件。
+插件的**自定义参数**（搜索深度、返回条数、语言等）声明在 `config_schema.properties.settings` 下——宿主会把它转换成前端可渲染的字段列表，参数值经请求的 `ExtraConfig` 透传给插件。保留 key（`api_key` / `engine_id` / `base_url` / `proxy_url`）不会作为自定义字段重复出现。
 
-写法（平铺 properties，key 即参数名）：
+写法（放在 `settings` 分区下，key 即参数名）：
 
 ```yaml
 config_schema:
   type: object
   properties:
-    search_depth:
-      type: string
-      title: Search Depth             # 表单 label
-      description: basic 或 advanced  # 输入提示与说明文字
-      enum: [basic, advanced]         # 有 enum 时渲染为下拉框
-      default: basic
-    page_size:
-      type: integer                   # 渲染为数字输入框
-      title: Page Size
-      default: 5
-    safe_mode:
-      type: boolean                   # 渲染为开关
-      title: Safe Mode
+    settings:
+      type: object
+      properties:
+        search_depth:
+          type: string
+          title: Search Depth             # 表单 label
+          description: basic 或 advanced  # 输入提示与说明文字
+          enum: [basic, advanced]         # 有 enum 时渲染为下拉框
+          default: basic
+        page_size:
+          type: integer                   # 渲染为数字输入框
+          title: Page Size
+          default: 5
+        safe_mode:
+          type: boolean                   # 渲染为开关
+          title: Safe Mode
 ```
 
 字段属性与控件映射：
@@ -215,19 +233,17 @@ config_schema:
 约定与边界：
 
 - **值统一为字符串**：无论声明什么类型，参数值都以字符串存入 `ExtraConfig`（`"5"`、`"true"`），插件侧自行解析。
-- **扩展字段明文存储**：`extra_config` 不做加密/脱敏。**敏感凭证一律用保留 key `api_key`**（走加密与 `/credentials` 子资源），不要在 schema 里声明 secret 类凭证字段。
-- 同时写了 `config` 和 `config_schema` 时：`config` 负责保留 key 能力声明，`config_schema` 负责扩展字段渲染；只有 `config` 时，扩展字段按 label = description 简化渲染（推荐直接写 schema）。
+- **扩展字段明文存储**：`extra_config` 不做加密/脱敏。**敏感凭证一律用 `credentials` 分区的 `api_key`**（走加密），不要在 `settings` 里声明 secret 类凭证字段（`secret: true` 只能出现在 `credentials` 分区，且 search 的 `credentials` 只允许 `api_key`）。
 
 ### 网络策略（联网插件必读）
 
-Web Search 插件需要出站联网，所以 `permissions.network` 不能是 `none`。两种选择：
+Web Search 插件需要出站联网，所以 `permissions.network` 必须是 `allowlist`：
 
-- `egress`：受控出站（生产化的联网插件）。
-- `allowlist`：白名单模式，**必须同时提供 `allowed_destinations`**（源码 `manifest.go` 会校验：`allowlist` 且无白名单会直接装载失败）。
+- `allowlist`：白名单模式，**必须同时提供 `allowed_destinations`**（宿主装载时校验：`allowlist` 且无白名单会直接装载失败）。
 
 白名单匹配按**域名（host）+ 通配**，不是字符串前缀匹配——写 `api.example.com` 不会误放行 `api.example.com.evil.com`。
 
-**反 SSRF 边界（重要）**：出站守卫会拦截内网/私有地址（`isForbiddenIP` 含 `IsPrivate()`）——即使 `allowed_destinations` 显式写入了内网 host，连接仍会被拒绝。因此**对接内网搜索服务的插件目前无法出站**，需先在宿主侧调整网络守卫。此外，请求里的 `BaseURL` 覆盖目标同样受 allowlist 约束：指向白名单外的域名会被拦截。
+**反 SSRF 边界（重要）**：出站守卫会拦截内网/私有地址（`IsForbiddenIP` 含 `IsPrivate()`）——即使 `allowed_destinations` 显式写入了内网 host，连接仍会被拒绝。因此**对接内网搜索服务的插件目前无法出站**，需先在宿主侧调整网络守卫。此外，请求里的 `BaseURL` 覆盖目标同样受 allowlist 约束：指向白名单外的域名会被拦截。
 
 ## 6. 校验与验证
 

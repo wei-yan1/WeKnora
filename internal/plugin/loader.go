@@ -11,6 +11,7 @@ import (
 
 	"github.com/Tencent/WeKnora/internal/datasource"
 	infraWebSearch "github.com/Tencent/WeKnora/internal/infrastructure/web_search"
+	"github.com/Tencent/WeKnora/internal/logger"
 )
 
 // rescanMu serializes external plugin discovery/loading so a manual rescan
@@ -42,17 +43,18 @@ func LoadExternalWithRegistries(ctx context.Context, roots []string, manager *Ma
 		return err
 	}
 	adapters := NewExtensionAdapterRegistry(registry, searchRegistry, retrieverRegistry)
-	loaded := make([]loadedAdapter, 0, len(packages))
+	// 插件级隔离：单个插件加载失败只记录并跳过，成功插件保留运行，不再整体回滚。
+	// 一个损坏的外部插件不应拖垮宿主启动（与热重扫 Rescan 的隔离语义一致）。
+	var failed []string
 	for _, pkg := range packages {
-		item, err := loadOnePackage(ctx, pkg, manager, adapters)
-		if err != nil {
-			for i := len(loaded) - 1; i >= 0; i-- {
-				loaded[i].adapter.Unregister(loaded[i].handle)
-				_ = manager.Unregister(context.Background(), loaded[i].id)
-			}
-			return err
+		if _, err := loadOnePackage(ctx, pkg, manager, adapters); err != nil {
+			logger.Errorf(ctx, "load external plugin %q failed: %v", pkg.Manifest.ID, err)
+			failed = append(failed, pkg.Manifest.ID)
+			continue
 		}
-		loaded = append(loaded, item)
+	}
+	if len(failed) > 0 {
+		logger.Warnf(ctx, "isolated %d failed external plugin(s): %v (host continues startup)", len(failed), failed)
 	}
 	return nil
 }
@@ -72,15 +74,27 @@ func loadOnePackage(ctx context.Context, pkg Package, manager *Manager, adapters
 	if manifest.Entrypoint == "" {
 		return loadedAdapter{}, fmt.Errorf("plugin %q has no entrypoint", manifest.ID)
 	}
+	plan, err := ResolveExecutionPlan(manifest, manager.PluginTrustLevel(manifest.ID))
+	if err != nil {
+		// Keep a failed placeholder so the plugin card stays visible in the
+		// management UI and the trust level can be corrected; rescan retries
+		// failed placeholders once the configuration is fixed.
+		manager.RegisterFailed(manifest, err.Error())
+		return loadedAdapter{}, err
+	}
+	// Apply deployment policy to the runtime copy only.
+	runtimeManifest := manifest
+	runtimeManifest.Permissions.Network = plan.Network
+	runtimeManifest.Permissions.AllowedDestinations = append([]string(nil), plan.Allowlist...)
 	var runtime Runtime
-	if strings.HasPrefix(manifest.Entrypoint, "docker://") {
-		runtime = NewDockerRuntime(manifest, strings.TrimPrefix(manifest.Entrypoint, "docker://"))
+	if plan.Isolation == IsolationOCI {
+		runtime = newOCIRuntime(runtimeManifest, strings.TrimPrefix(manifest.Entrypoint, "docker://"))
 	} else {
 		entrypoint := manifest.Entrypoint
 		if !filepath.IsAbs(entrypoint) {
 			entrypoint = filepath.Join(pkg.Root, entrypoint)
 		}
-		runtime = NewProcessRuntime(manifest, entrypoint)
+		runtime = NewProcessRuntime(runtimeManifest, entrypoint)
 	}
 	adapter, ok := adapters.Get(manifest.ExtensionType)
 	if !ok {
@@ -92,7 +106,11 @@ func loadOnePackage(ctx context.Context, pkg Package, manager *Manager, adapters
 		return loadedAdapter{}, err
 	}
 	if err := manager.Start(ctx, manifest.ID); err != nil {
-		rollbackLoad(ctx, manager, adapter, handle, manifest)
+		// Keep the manager entry — manager.Start already recorded StateFailed on
+		// it — so the failed plugin stays visible in the plugin management UI and
+		// can be retried after a trust change or a rescan. Only detach it from
+		// the business registry so a dead plugin is not selectable downstream.
+		adapter.Unregister(handle)
 		return loadedAdapter{}, err
 	}
 	return loadedAdapter{id: manifest.ID, adapter: adapter, handle: handle}, nil
@@ -201,8 +219,16 @@ func RescanExternalWithRegistries(ctx context.Context, roots []string, manager *
 	for _, pkg := range packages {
 		manifest := pkg.Manifest
 		if prev, ok := existing[manifest.ID]; ok {
-			if manifestsEqual(prev, manifest) {
+			trustUnchanged := manager.PluginTrustLevel(manifest.ID) == manager.LoadedTrustLevel(manifest.ID)
+			snap, _ := manager.HealthSnapshot(manifest.ID)
+			// Retry plugins that failed to start OR turned unhealthy on a
+			// previous pass (e.g. their container was removed externally), so a
+			// rescan is also a healing pass — not only a manifest diff.
+			previouslyBroken := snap.State == StateFailed || snap.State == StateUnhealthy
+			if manifestsEqual(prev, manifest) && trustUnchanged && !previouslyBroken {
 				report.Skipped = append(report.Skipped, manifest.ID)
+			} else if err := reloadPackage(ctx, prev, pkg, manager, adapters); err != nil {
+				report.Errors = append(report.Errors, fmt.Sprintf("%s: %v", manifest.ID, err))
 			} else {
 				report.Changed = append(report.Changed, manifest.ID)
 			}
@@ -222,4 +248,30 @@ func RescanExternalWithRegistries(ctx context.Context, roots []string, manager *
 func manifestsEqual(a, b Manifest) bool {
 	a.SourceDir, b.SourceDir = "", ""
 	return reflect.DeepEqual(a, b)
+}
+
+// reloadPackage unloads a previously-loaded plugin whose manifest changed and
+// reloads it from the newly discovered package. The unload recomputes the
+// adapter handle from the PREVIOUS manifest — handles are deterministic, but a
+// registration name (e.g. metadata.provider) may itself change, so the old
+// handle must be derived from the old manifest to unregister the old entry. No
+// cross-call state needs to be kept. If the new manifest is invalid the reload
+// fails and the plugin is left unloaded — reported via Errors — which matches
+// what a cold restart would do.
+func reloadPackage(ctx context.Context, prev Manifest, pkg Package, manager *Manager, adapters *ExtensionAdapterRegistry) error {
+	manifest := pkg.Manifest
+	adapter, ok := adapters.Get(manifest.ExtensionType)
+	if !ok {
+		return fmt.Errorf("plugin %q uses extension_type %q, but no adapter is registered for it", manifest.ID, manifest.ExtensionType)
+	}
+	// 卸载旧插件：用旧 manifest 推导 handle 清理旧业务注册表，manager 按 ID 停掉旧 runtime。
+	adapter.Unregister(adapter.HandleFromManifest(prev))
+	if _, ok := manager.Get(manifest.ID); ok {
+		_ = manager.Unregister(ctx, manifest.ID)
+	}
+	// 重新加载新 manifest。
+	if _, err := loadOnePackage(ctx, pkg, manager, adapters); err != nil {
+		return err
+	}
+	return nil
 }

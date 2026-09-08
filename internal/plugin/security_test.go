@@ -22,7 +22,7 @@ func TestNetworkGuardBlocksAndAuditsNoNetwork(t *testing.T) {
 
 func TestNetworkGuardBlocksPrivateResolution(t *testing.T) {
 	audit := &MemoryAuditSink{}
-	guard := &NetworkGuard{PluginID: "test", Policy: NetworkEgress, Audit: audit, Resolver: func(context.Context, string) ([]net.IP, error) { return []net.IP{net.ParseIP("10.0.0.1")}, nil }}
+	guard := &NetworkGuard{PluginID: "test", Policy: NetworkAllowlist, Allowlist: []string{"api.example.com"}, Audit: audit, Resolver: func(context.Context, string) ([]net.IP, error) { return []net.IP{net.ParseIP("10.0.0.1")}, nil }}
 	require.Error(t, guard.Check(context.Background(), "https://api.example.com"))
 	require.False(t, audit.Snapshot()[0].Allowed)
 }

@@ -482,7 +482,7 @@ func TestIsValidEngineType(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestConnectionConfig_ValueScan(t *testing.T) {
-	t.Run("encrypts password and api_key on Value, decrypts on Scan", func(t *testing.T) {
+	t.Run("encrypts username, password and api_key on Value, decrypts on Scan", func(t *testing.T) {
 		t.Setenv("SYSTEM_AES_KEY", testAESKey)
 
 		original := ConnectionConfig{
@@ -503,7 +503,8 @@ func TestConnectionConfig_ValueScan(t *testing.T) {
 		assert.True(t, strings.HasPrefix(intermediate["api_key"].(string), "enc:v1:"))
 		// Non-sensitive fields remain plaintext
 		assert.Equal(t, "http://es:9200", intermediate["addr"])
-		assert.Equal(t, "elastic", intermediate["username"])
+		// Username is a credential too (see internal/plugin credentialFieldAllowlist)
+		assert.True(t, strings.HasPrefix(intermediate["username"].(string), "enc:v1:"))
 
 		// Scan — decrypt
 		var scanned ConnectionConfig

@@ -355,6 +355,10 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	// control plane instead of registering a second manager.
 	must(container.Provide(initConnectorRegistry))
 	must(container.Invoke(startBuiltinPlugins))
+	// Register the model-service config re-pusher before any external plugin is
+	// loaded so boot-time model plugin starts (and later supervisor restarts)
+	// re-deliver saved api_key/base_url config into the plugin's in-memory cache.
+	must(container.Invoke(registerModelConfigRepusher))
 	must(container.Invoke(loadExternalPlugins))
 	must(container.Provide(datasource.NewSyncCoordinator))
 	must(container.Provide(datasource.NewSchedulerWithCoordinator))
@@ -1710,8 +1714,25 @@ func startBuiltinPlugins(manager *pluginPkg.Manager) error {
 	return pluginPkg.StartAll(context.Background(), manager)
 }
 
-func loadExternalPlugins(manager *pluginPkg.Manager, registry *datasource.ConnectorRegistry, searchRegistry *infra_web_search.Registry, retrieverRegistry *pluginPkg.RetrieverProviderRegistry) error {
-	return pluginPkg.LoadExternalFromEnvWithRegistries(context.Background(), manager, registry, searchRegistry, retrieverRegistry)
+// registerModelConfigRepusher wires the model service into the plugin manager
+// as the sink that re-delivers saved model configuration after a model plugin
+// (re)starts. The assertion is structural: the model service gains a
+// RepushModelConfigs method, while the plugin manager stays generic.
+func registerModelConfigRepusher(manager *pluginPkg.Manager, modelService interfaces.ModelService) error {
+	if repusher, ok := modelService.(pluginPkg.ModelConfigRepusher); ok {
+		manager.SetModelConfigRepusher(repusher)
+	}
+	return nil
+}
+
+func loadExternalPlugins(manager *pluginPkg.Manager, registry *datasource.ConnectorRegistry, searchRegistry *infra_web_search.Registry, retrieverRegistry *pluginPkg.RetrieverProviderRegistry, settings interfaces.SystemSettingService) error {
+	ctx := context.Background()
+	raw := settings.GetString(ctx, "plugins.trust_levels", "WEKNORA_PLUGIN_TRUST_LEVELS", "")
+	if err := pluginPkg.ConfigureManagerTrust(manager, raw); err != nil {
+		logger.Errorf(ctx, "[Plugin] invalid persisted trust configuration; all external plugins will start offline: %v", err)
+		manager.SetPluginTrustConfig(pluginPkg.PluginTrustConfig{})
+	}
+	return pluginPkg.LoadExternalFromEnvWithRegistries(ctx, manager, registry, searchRegistry, retrieverRegistry)
 }
 
 // startPluginHealthSupervisor activates the manager-wide control-plane health

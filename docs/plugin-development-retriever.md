@@ -77,10 +77,12 @@ rpc Patch(RetrieverPatchRequest) returns (RetrieverResponse)
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `Settings` | `map[string]any` | 非敏感连接参数。除宿主预置的固定键（`addr`、`host`、`port`、`use_tls`、`database`、`grpc_address`、`scheme`、`http_port`、`insecure_skip_verify`、`use_default_connection`）外，**你在 `config_schema.settings` 里声明的任意自定义字段名（如 `endpoint`、`collection_prefix`、`compat_mode`）也会原样透传到这里** |
-| `Credentials` | `map[string]any` | 敏感凭证。仅宿主预置的三个固定键：`username`、`password`、`api_key` |
+| `Credentials` | `map[string]any` | 敏感凭证。宿主预置的固定键 `username`、`password`、`api_key` 之外，**你在 `config_schema.credentials` 里声明 `secret: true` 的任意自定义字段（如 `token`）也会原样透传到这里，且落库时同样加密** |
 | `IndexConfig` | `map[string]any` | 索引/collection 配置，来自 `config_schema.index_config` 声明的字段 |
 
-> **透传约定**：插件 `config_schema` 里声明的 `settings` 字段（无论叫什么名字）会在运行时原样出现在 `Settings` 里，宿主不解释字段含义。若你的自定义「凭证」字段不叫 `api_key`/`username`/`password`，它会被归入 `Settings` 而非 `Credentials`——请把需要走凭证脱敏逻辑的字段命名为这三个固定名之一。
+> **透传约定**：插件 `config_schema` 里声明的 `settings` 字段（无论叫什么名字）会在运行时原样出现在 `Settings` 里，宿主不解释字段含义。
+
+> **凭证加密（重要）**：`credentials` 区的**所有字符串字段都会加密落库**——宿主预置的 `username`/`password`/`api_key` 走固定字段加密，你在 `config_schema.credentials` 里声明的自定义 secret 字段（如 `token`）则由宿主在保存时动态捕获、加密存储，运行时解密后原样透传到 `config.Credentials`。也就是说，**任意命名的凭证字段都受加密保护，不必迁就固定三键**。
 
 ### 3.3 `BatchPut`：批量写入
 
@@ -229,6 +231,10 @@ config_schema:                     # 用 JSON Schema 描述 OpenStore 时需要�
           type: string
           secret: true            # 敏感字段，宿主会脱敏
           title: API Key
+        token:                    # 自定义凭证字段：字段名可任意（如 token），
+          type: string            # 宿主动态捕获、加密落库，运行时解密后透传
+          secret: true
+          title: 访问令牌
     index_config:                  # 索引/collection 配置 → 透传到 config.IndexConfig
       type: object
       properties:
@@ -246,6 +252,12 @@ permissions:
 
 - `metadata.engine_type` **不能为空**——`RegisterExternalRetriever` 明确要求 retriever 插件声明引擎类型，否则无法装载。
 - `metadata.engine_type` **不能与宿主内建引擎类型重名**（`postgres`/`sqlite`/`elasticsearch`/`opensearch`/`qdrant`/`milvus`/`weaviate`/`doris`/`tencent_vectordb`）。要复刻某个内建引擎，请起别名（如 `milvux`），并通过 `ScoreSemantics` 声明正确的分数语义——宿主按语义归一化，不依赖引擎名。
+
+### 运行方式与网络声明（黑盒约定）
+
+插件通过 `entrypoint` 声明启动方式：可执行文件，或 `docker://镜像`。通过 `permissions.network` 声明网络范围：`none` 或 `allowlist` + `allowed_destinations`（检索引擎通常需要连后端数据库，用 `allowlist`）。出站请求必须经 `pluginapi.NewPluginHTTPClient()` 发起，不要用裸 `http.Client`，否则白名单不生效。
+
+实际运行隔离方式（进程 / 容器、断网、出口代理）由宿主部署环境决定；插件作者不需要实现或配置 Runtime Agent / Docker Socket / 镜像校验。
 
 ### 图标（icon）
 
@@ -319,3 +331,98 @@ Retriever 插件**只负责「向量的写入 / 检索 / 删除 / 元数据更�
 - **Collection/维度分表、连接池、后端重试、事务**——这是插件**自己内部**的事，宿主不关心，只要协议输出正确。
 
 一句话：**插件管「具体后端怎么存怎么查」，宿主管「算好向量、编排流程、融合结果」**。插件内部可以自由使用任何数据库、任何索引结构、任何维度策略，只要守住上面的协议契约。
+
+## 10. 部署网络适配（ProcessRuntime + Docker Service DNS）
+
+Retriever 插件通常用后端数据库的**原生 gRPC/TCP 客户端**（如 Milvus SDK）建立连接，而不是走 `NewPluginHTTPClient()` 的 HTTP 出口。因此它的网络可达性由**部署拓扑**决定，而不是由 `permissions.network` 的 HTTP allowlist 决定。
+
+> 本节以本仓库实际的 `milvux`（Milvus 兼容）插件、以及正式/开发两套 compose 部署为例说明。文中的 `milvus` 服务名、`weknora_WeKnora-network` 网络名、`addr` 字段名**均为示例值**，可按你的实际后端与插件替换，不构成框架规范。
+
+### 10.1 网络可达性的来源：进程继承 app 网络
+
+ProcessRuntime 把插件作为 **app 容器的子进程**启动，插件**继承 app 的 Docker 网络命名空间**。因此：
+
+- app 容器能解析的服务名，插件就能解析；
+- app 容器能访问的后端，插件就能访问。
+
+宿主框架**不解析后端类型、不注入网络、不写地址映射**——它只负责正常启动插件进程，网络可达性完全交给 Docker 网络拓扑。
+
+### 10.2 寻址规范：用 Compose Service Name，不用 container_name
+
+后端地址必须写成 **Compose service name**，而不是 `container_name`：
+
+| 写法 | 是否稳定 |
+|---|---|
+| `milvus:19530` | ✅ service name，Compose 网络内稳定，不随部署形态变化 |
+| `WeKnora-milvus:19530` | ❌ `container_name`，随实例/项目名变化 |
+| `WeKnora-milvus-dev:19530` | ❌ 另一个 compose 文件的容器名，跨项目不可解析 |
+
+`config_schema` 里的地址字段名**由插件自治**（`addr` / `endpoint` / `host` 皆可），宿主原样透传 `settings`，不解释、不重命名。插件在 `openBackend` 里读自己的字段即可：
+
+```go
+addr := getString(config.Settings, "addr")   // 示例：addr 是 milvux 自己的字段名（见它的 config_schema），
+                                             // 非框架规定；别的插件可用 endpoint / host / server_addr 等任意名
+```
+
+### 10.3 拓扑：app 与后端服务同处一个 Docker 网络
+
+```text
+app 容器（含 Retriever 子进程，继承 app 网络）
+    │
+    └── 与目标后端（milvus / qdrant / doris …）同处一个 Docker 网络
+          │
+          └── 插件用 service-name:port 访问后端
+```
+
+- **同一 compose 文件**：`app` 与后端服务加入同一个网络即可，天然可解析。
+- **后端由另一个 compose 文件管理**：后端服务的 compose 用外部网络接入 app 所在网络，并注册 service-name 别名：
+
+> ⚠️ `networks:` 下多个网络必须用**统一的映射写法**，不能把列表项（`- xxx`）和映射键混排——那是非法 YAML，`docker compose config` 会报 `did not find expected '-' indicator`。
+
+```yaml
+services:
+  milvus:
+    networks:
+      WeKnora-network-dev:    # 本 compose 自己的网络（映射写法）
+      WeKnora-network:        # 外部网络：app 所在的正式运行网络
+        aliases:
+          - milvus            # service-name 别名，使 dev 与正式环境寻址名统一
+
+networks:
+  WeKnora-network-dev:
+    driver: bridge
+  WeKnora-network:
+    external: true
+    # 默认名是「compose 项目目录名 + 网络 key」派生的（如 weknora_WeKnora-network），
+    # 项目目录改名后网络名会变；用环境变量显式锚定，默认值与实际部署一致。
+    name: ${WEKNORA_NETWORK_NAME:-weknora_WeKnora-network}
+```
+
+### 10.4 信任等级与本方案的范围
+
+框架仍支持 `offline` / `trusted` / `isolated` 三档，本方案**不在代码里强制任何等级**。但需注意，三档的**强制力不同**：
+
+| 信任等级 | 网络策略语义 | 强制力 |
+|---|---|---|
+| `offline` | 宿主以 `NetworkNone` 声明启动（`WEKNORA_PLUGIN_NETWORK_POLICY=none`） | **声明性**：进程模式无网络命名空间隔离，依赖插件侧遵守策略（如经 SDK guarded client 的请求会被拒）；原生 TCP/gRPC 直连绕过 HTTP 出口，宿主无法拦截 |
+| `trusted` | 按 manifest 声明放行（`allowlist` 时取 `allowed_destinations`） | 声明性，同上；进程模式实际网络能力 = app 容器的全部网络 |
+| `isolated` | OCI 容器 `--network none` + egress 代理（HTTP） | **硬强制**：无直连网络；非 HTTP 出口（Retriever 的原生 gRPC/TCP）当前无代理通道 |
+
+> ⚠️ **Retriever 无法走 HTTP 出口连内网后端**：SDK guarded client 的 `IsForbiddenIP` 会无条件拒绝私网/环回地址（`network_policy.go`），**即使 allowlist 写了 `"*"`** 也一样。因此 `milvus:19530` 这类内网地址只能由插件用原生客户端直连（即本方案的 ProcessRuntime 继承路径），HTTP 出口对 Retriever 后端是死路。
+
+因此：
+
+- **`trusted` 是本方案下 Retriever 联网后端的部署约定**——不是技术强制，而是「按声明联网」的合规语义；`offline` 剖面下不验证联网能力；
+- `isolated` 进入 OCI Runtime 后无法直连后端原生 gRPC，当前阶段不覆盖（见 10.5 的长期演进方向）；
+- 本阶段的验证范围限定为 **`trusted + ProcessRuntime` 部署剖面**：`entrypoint` 为普通进程入口，部署信任配置设为 `trusted`，插件继承 app 网络访问后端。
+
+### 10.5 不做什么（边界）
+
+为避免破坏五类扩展点的统一运行时模型，本方案**不做**以下任何一件事：
+
+- 不在 `retriever_registration.go` / `loader.go` / `runtime_plan.go` / `trust_policy.go` 中增加 Retriever 专用分支；
+- 不写 `if extensionType == "retriever" { … }` 之类的特判；
+- 不让 `isolated` 插件直接 `--network WeKnora-network`（会绕过 egress 策略、破坏断网语义）；
+- 不修改 Retriever 协议，不重命名插件配置字段。
+
+**一句话：部署网络负责可达性，ProcessRuntime 负责启动进程，Manager 负责生命周期，Retriever Adapter 负责业务绑定，插件负责后端连接。** 需要为不可信 Retriever 提供安全联网能力时，应演进为协议无关的 TCP/gRPC Egress（落在 Runtime / Egress Gateway / `pluginapi`，而非 Retriever Adapter），这是后续阶段的事，不在本方案范围内。

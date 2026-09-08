@@ -3,9 +3,11 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
+	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/pkg/pluginapi"
 	pluginproto "github.com/Tencent/WeKnora/pkg/pluginapi/proto"
 	"google.golang.org/grpc"
@@ -112,6 +114,7 @@ type pluginEntry struct {
 	restartCount   int
 	admission      *admissionController
 	lifecycle      sync.Mutex
+	loadedTrust    PluginTrustLevel
 }
 
 type Manager struct {
@@ -122,6 +125,23 @@ type Manager struct {
 	supervisorCancel context.CancelFunc
 	supervisorWG     sync.WaitGroup
 	admissionConfig  AdmissionConfig
+	trustConfig      PluginTrustConfig
+	supervisionAudit AuditSink
+	// modelConfigRepusher re-delivers saved model configurations to a model
+	// plugin after it (re)starts. See ModelConfigRepusher.
+	modelConfigRepusher ModelConfigRepusher
+}
+
+// ModelConfigRepusher re-delivers persisted per-model configuration (api_key,
+// base_url, extra_config) to a model plugin after its runtime (re)starts.
+//
+// Model plugins cache configuration in-process after the one-shot
+// ValidateConfig delivered at model-save time; a restart empties that cache.
+// The host owns the authoritative copy in its DB, so a repusher implementation
+// re-pushes it on every (re)start path. It is registered at wiring time and
+// only consulted for ExtensionModel plugins.
+type ModelConfigRepusher interface {
+	RepushModelConfigs(ctx context.Context, providerName string) error
 }
 
 // HealthSupervisorConfig controls active health monitoring. Monitoring is
@@ -142,11 +162,127 @@ const (
 )
 
 func NewManager(hostVersion string) *Manager {
-	return &Manager{hostVersion: hostVersion, entries: make(map[string]*pluginEntry), admissionConfig: defaultAdmissionConfig()}
+	return &Manager{hostVersion: hostVersion, entries: make(map[string]*pluginEntry), admissionConfig: defaultAdmissionConfig(), trustConfig: LoadPluginTrustConfig(), supervisionAudit: LoggerAuditSink{}}
 }
 
 func NewManagerWithAdmission(hostVersion string, config AdmissionConfig) *Manager {
-	return &Manager{hostVersion: hostVersion, entries: make(map[string]*pluginEntry), admissionConfig: config}
+	return &Manager{hostVersion: hostVersion, entries: make(map[string]*pluginEntry), admissionConfig: config, trustConfig: LoadPluginTrustConfig(), supervisionAudit: LoggerAuditSink{}}
+}
+
+// SetSupervisionAuditSink injects the sink that receives supervision events
+// (health degradation, supervisor-triggered restarts and their outcomes). The
+// default writes to the host log stream; deployments that persist audit rows
+// should call this once at startup before starting the health supervisor.
+func (m *Manager) SetSupervisionAuditSink(sink AuditSink) {
+	if sink == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.supervisionAudit = sink
+}
+
+// recordSupervision emits one supervision audit event. Failures to record are
+// deliberately swallowed: supervision must never panic or block the lifecycle
+// path because auditing is unavailable.
+func (m *Manager) recordSupervision(pluginID, action string, allowed bool, reason, policy string) {
+	m.mu.RLock()
+	sink := m.supervisionAudit
+	m.mu.RUnlock()
+	if sink == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	sink.Record(AuditEvent{
+		PluginID: pluginID,
+		Action:   action,
+		Allowed:  allowed,
+		Reason:   reason,
+		Policy:   policy,
+		At:       time.Now().UTC(),
+	})
+}
+
+// SetPluginTrustConfig replaces the deployment-scoped trust map used by future loads and rescans.
+// A nil or missing plugin entry is intentionally treated as offline.
+func (m *Manager) SetPluginTrustConfig(config PluginTrustConfig) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.trustConfig = config.Clone()
+}
+
+// SetModelConfigRepusher installs the single re-push sink for model plugin
+// configuration. It must be called before any model plugin starts so boot-time
+// loads are covered; later restarts also consult it.
+func (m *Manager) SetModelConfigRepusher(repusher ModelConfigRepusher) {
+	if repusher == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.modelConfigRepusher = repusher
+}
+
+// fireModelConfigRepush re-delivers saved model configs after a model plugin
+// reaches Running. It is invoked from every (re)start path. The call runs
+// asynchronously and outside all manager locks: a repusher does DB queries plus
+// a gRPC ValidateConfig round-trip and must never back-pressure the lifecycle.
+func (m *Manager) fireModelConfigRepush(manifest Manifest) {
+	if manifest.ExtensionType != ExtensionModel {
+		return
+	}
+	m.mu.RLock()
+	repusher := m.modelConfigRepusher
+	m.mu.RUnlock()
+	if repusher == nil {
+		return
+	}
+	providerName := ModelProviderName(manifest)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := repusher.RepushModelConfigs(ctx, providerName); err != nil {
+			logger.Warnf(ctx, "[Plugin] repush model configs for provider %q failed: %v", providerName, err)
+		}
+	}()
+}
+
+func (m *Manager) PluginTrustLevel(id string) PluginTrustLevel {
+	m.mu.RLock()
+	config := m.trustConfig
+	m.mu.RUnlock()
+	return config.Level(id)
+}
+
+// GetPluginTrustConfig returns a copy of the deployment-scoped trust map.
+func (m *Manager) GetPluginTrustConfig() PluginTrustConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.trustConfig.Clone()
+}
+
+// LoadedTrustLevel returns the trust level the plugin was loaded with. Rescan
+// uses it to detect a trust change that requires a reload (a trust change does
+// not alter the manifest, so manifest-equality alone would skip it).
+func (m *Manager) LoadedTrustLevel(id string) PluginTrustLevel {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	entry, ok := m.entries[id]
+	if !ok {
+		return TrustOffline
+	}
+	return entry.loadedTrust
+}
+
+// SetPluginTrustLevel updates a single plugin's trust level in place. It is used
+// by the plugin management API so an admin can change one plugin without a full
+// config swap.
+func (m *Manager) SetPluginTrustLevel(id string, level PluginTrustLevel) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cfg := m.trustConfig.Clone()
+	cfg[id] = level
+	m.trustConfig = cfg
 }
 
 type InvocationLease struct {
@@ -311,7 +447,21 @@ func (m *Manager) superviseOne(ctx context.Context, id string, cfg HealthSupervi
 	if shouldRestart {
 		entry.restartCount++
 	}
+	failures, attempt, trust := entry.healthFailures, entry.restartCount, string(entry.loadedTrust)
 	m.mu.Unlock()
+
+	// Supervision audit: every degradation decision and restart trigger is
+	// recorded so the supervision trail is retrievable from the audit stream.
+	if health.State == StateUnhealthy && !shouldRestart {
+		m.recordSupervision(id, "supervision.unhealthy", false,
+			fmt.Sprintf("health %q persisted for %d checks (threshold %d); no restart scheduled",
+				health.State, failures, cfg.FailureThreshold), trust)
+	}
+	if shouldRestart {
+		m.recordSupervision(id, "supervision.restart.triggered", true,
+			fmt.Sprintf("health %q persisted for %d checks (threshold %d); restart attempt %d of %d",
+				health.State, failures, cfg.FailureThreshold, attempt, cfg.MaxRestartCount), trust)
+	}
 
 	if shouldRestart {
 		m.restartOne(ctx, id, runtime, generation)
@@ -327,6 +477,7 @@ func (m *Manager) restartOne(ctx context.Context, id string, runtime Runtime, ex
 	}
 	admission := entry.admission
 	drainTimeout := admission.config.DrainTimeout
+	trust := string(entry.loadedTrust)
 	m.mu.RUnlock()
 	entry.lifecycle.Lock()
 	defer entry.lifecycle.Unlock()
@@ -347,9 +498,15 @@ func (m *Manager) restartOne(ctx context.Context, id string, runtime Runtime, ex
 	if stopErr != nil {
 		m.mu.Lock()
 		if entry, ok := m.entries[id]; ok {
+			// runtime.Stop already tore the gRPC connection down even when it
+			// reports an error; leaving started=true would let AcquireInvocation
+			// admit calls against a nil conn (nil-pointer panic downstream).
+			entry.started = false
 			entry.state = HealthStatus{State: StateFailed, Message: "restart stop failed: " + stopErr.Error(), CheckedAt: time.Now().UTC(), Generation: entry.generation}
 		}
 		m.mu.Unlock()
+		m.recordSupervision(id, "supervision.restart.failed", false,
+			"restart aborted: stop failed: "+stopErr.Error(), trust)
 		return
 	}
 	postStopCtx, cancelPostStop := context.WithTimeout(ctx, defaultCancellationGrace)
@@ -360,6 +517,8 @@ func (m *Manager) restartOne(ctx context.Context, id string, runtime Runtime, ex
 		entry.started = false
 		entry.state = HealthStatus{State: StateFailed, Message: "old plugin calls did not terminate after stop: " + postStopErr.Error(), CheckedAt: time.Now().UTC(), Generation: entry.generation}
 		m.mu.Unlock()
+		m.recordSupervision(id, "supervision.restart.failed", false,
+			"restart aborted: old plugin calls did not terminate after stop: "+postStopErr.Error(), trust)
 		return
 	}
 	startCtx, cancelStart := context.WithTimeout(ctx, defaultStartGrace)
@@ -372,12 +531,16 @@ func (m *Manager) restartOne(ctx context.Context, id string, runtime Runtime, ex
 			entry.state = HealthStatus{State: StateFailed, Message: "restart start failed: " + startErr.Error(), CheckedAt: time.Now().UTC(), Generation: entry.generation}
 		}
 		m.mu.Unlock()
+		m.recordSupervision(id, "supervision.restart.failed", false,
+			"restart aborted: start failed: "+startErr.Error(), trust)
 		return
 	}
 	health := runtime.Health(ctx)
 	if health.State == "" {
 		health.State = StateRunning
 	}
+	newGeneration := uint64(0)
+	var manifest Manifest
 	m.mu.Lock()
 	if entry, ok := m.entries[id]; ok {
 		entry.started = true
@@ -386,9 +549,15 @@ func (m *Manager) restartOne(ctx context.Context, id string, runtime Runtime, ex
 		health.Generation = entry.generation
 		health.CheckedAt = time.Now().UTC()
 		entry.state = health
+		newGeneration = entry.generation
+		trust = string(entry.loadedTrust)
+		manifest = entry.manifest
 	}
 	m.mu.Unlock()
 	admission.resume()
+	m.recordSupervision(id, "supervision.restart.completed", true,
+		fmt.Sprintf("plugin restarted by the health supervisor; generation bumped to %d", newGeneration), trust)
+	m.fireModelConfigRepush(manifest)
 }
 
 func (m *Manager) Register(manifest Manifest, runtime Runtime) error {
@@ -414,7 +583,13 @@ func (m *Manager) Register(manifest Manifest, runtime Runtime) error {
 	if _, exists := m.entries[manifest.ID]; exists {
 		return fmt.Errorf("plugin %q already registered", manifest.ID)
 	}
-	m.entries[manifest.ID] = &pluginEntry{manifest: manifest, runtime: runtime, state: HealthStatus{State: StateDiscovered}, admission: newAdmissionController(m.admissionConfig)}
+	m.entries[manifest.ID] = &pluginEntry{
+		manifest:    manifest,
+		runtime:     runtime,
+		state:       HealthStatus{State: StateDiscovered},
+		admission:   newAdmissionController(m.admissionConfig),
+		loadedTrust: m.trustConfig.Level(manifest.ID),
+	}
 	return nil
 }
 
@@ -462,8 +637,10 @@ func (m *Manager) Start(ctx context.Context, id string) error {
 	health.Generation = entry.generation
 	health.CheckedAt = time.Now().UTC()
 	entry.state = health
+	manifest := entry.manifest
 	m.mu.Unlock()
 	entry.admission.resume()
+	m.fireModelConfigRepush(manifest)
 	return nil
 }
 
@@ -588,6 +765,52 @@ func (m *Manager) Unregister(ctx context.Context, id string) error {
 	return nil
 }
 
+// RegisterFailed records a discovered plugin whose runtime plan could not be
+// resolved (e.g. an OCI manifest set to "trusted", or a process plugin set to
+// "isolated"). Without this placeholder the plugin would have no card in the
+// management UI and no way back: the trust level can only be changed from the
+// card. Rescan retries failed placeholders once the configuration is fixed.
+func (m *Manager) RegisterFailed(manifest Manifest, reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.entries[manifest.ID] = &pluginEntry{
+		manifest: manifest,
+		state:    HealthStatus{State: StateFailed, Message: reason, CheckedAt: time.Now().UTC()},
+	}
+}
+
+// Restart stops and starts one plugin through the same bounded lifecycle the
+// health supervisor uses. It is the manual recovery entry point for an
+// unhealthy plugin (e.g. its container was removed externally) and also picks
+// up a freshly pulled OCI image without touching the trust configuration.
+func (m *Manager) Restart(ctx context.Context, id string) error {
+	m.mu.RLock()
+	entry, ok := m.entries[id]
+	if !ok {
+		m.mu.RUnlock()
+		return fmt.Errorf("plugin %q is not loaded", id)
+	}
+	if !entry.started {
+		m.mu.RUnlock()
+		return fmt.Errorf("plugin %q is not running; use rescan to retry a failed load", id)
+	}
+	runtime, generation := entry.runtime, entry.generation
+	m.mu.RUnlock()
+
+	m.restartOne(ctx, id, runtime, generation)
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	entry, ok = m.entries[id]
+	if !ok {
+		return fmt.Errorf("plugin %q disappeared during restart", id)
+	}
+	if entry.state.State != StateRunning {
+		return fmt.Errorf("restart plugin %q: %s", id, entry.state.Message)
+	}
+	return nil
+}
+
 func (m *Manager) List() []PluginInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -595,5 +818,14 @@ func (m *Manager) List() []PluginInfo {
 	for _, entry := range m.entries {
 		result = append(result, PluginInfo{Manifest: entry.manifest, State: entry.state})
 	}
+	// Map iteration order is randomized in Go; sort so the plugin management
+	// UI and any other consumer get a stable, deterministic listing.
+	sort.Slice(result, func(i, j int) bool {
+		ni, nj := result[i].Manifest.Name, result[j].Manifest.Name
+		if ni != nj {
+			return ni < nj
+		}
+		return result[i].Manifest.ID < result[j].Manifest.ID
+	})
 	return result
 }

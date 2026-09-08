@@ -21,7 +21,6 @@ func RegisterExternalWebSearch(
 	registry *infraWebSearch.Registry,
 	manifest Manifest,
 	runtime Runtime,
-	lazyStart bool,
 ) (string, error) {
 	if manifest.ExtensionType != ExtensionSearch {
 		return "", fmt.Errorf("plugin %q is not a web search provider", manifest.ID)
@@ -45,11 +44,6 @@ func RegisterExternalWebSearch(
 	}
 	info := webSearchProviderTypeInfo(manifest, providerType)
 	if err := registry.RegisterWithInfo(providerType, func(params types.WebSearchProviderParameters) (interfaces.WebSearchProvider, error) {
-		if lazyStart {
-			if err := manager.Start(context.Background(), manifest.ID); err != nil {
-				return nil, err
-			}
-		}
 		conn := provider.Conn()
 		if conn == nil {
 			return nil, fmt.Errorf("web search plugin %q is not running", manifest.ID)
@@ -62,9 +56,9 @@ func RegisterExternalWebSearch(
 	}
 	// A plugin-bundled icon is served by the host from the plugin directory;
 	// record its absolute path so the icon endpoint can stream it.
-	if iconFile, ok := resolveLocalIconFile(manifest.SourceDir, manifestIconValue(manifest)); ok {
+	registerPluginIconFile(manifest.SourceDir, manifest, func(iconFile string) {
 		registry.RegisterIconFile(providerType, iconFile)
-	}
+	})
 	return providerType, nil
 }
 

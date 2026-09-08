@@ -76,8 +76,10 @@ WORKDIR /app
 
 ARG APK_MIRROR_ARG
 
-# Create a non-root user first
-RUN useradd -m -s /bin/bash appuser
+# Create a non-root user first, joined to the shared runtime group (fixed GID
+# 2000) so it can reach sockets created by the plugin-runtime agent container.
+RUN groupadd -g 2000 weknora-runtime && \
+    useradd -m -s /bin/bash -G weknora-runtime appuser
 
 # First, install ca-certificates without mirror to ensure HTTPS works
 RUN apt-get update && \

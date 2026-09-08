@@ -126,6 +126,13 @@ var registry = map[string]settingSpec{
 		Description: "SSRF 防护白名单。可填入 example.com / *.foo.com / 10.0.0.0/8 / 2001:db8::1。" +
 			"修改后立即生效。SSRF_WHITELIST_EXTRA 环境变量仍由部署方维护，不在此处覆盖。",
 	},
+	"plugins.trust_levels": {
+		Type:        "string",
+		EnvName:     "WEKNORA_PLUGIN_TRUST_LEVELS",
+		Default:     "",
+		Category:    "security",
+		Description: "插件可信度配置 JSON。键为 plugin_id，值为 offline、trusted 或 isolated；未配置的插件默认 offline。",
+	},
 	"auth.registration_mode": {
 		Type:     "string",
 		EnvName:  "", // No env fallback — handler passes cfg.Auth.RegistrationMode as default

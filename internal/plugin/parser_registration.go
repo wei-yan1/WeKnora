@@ -43,7 +43,7 @@ func ParserDescriptorFromManifest(manifest Manifest) (ParserDescriptor, error) {
 	return descriptor, nil
 }
 
-func RegisterExternalParser(manager *Manager, manifest Manifest, runtime Runtime, descriptor ParserDescriptor, lazyStart bool) error {
+func RegisterExternalParser(manager *Manager, manifest Manifest, runtime Runtime, descriptor ParserDescriptor) error {
 	if manifest.ExtensionType != ExtensionParser {
 		return fmt.Errorf("plugin %q is not a parser", manifest.ID)
 	}
@@ -65,12 +65,6 @@ func RegisterExternalParser(manager *Manager, manifest Manifest, runtime Runtime
 		provider:   provider,
 		manager:    manager,
 		pluginID:   manifest.ID,
-		start: func(ctx context.Context) error {
-			if !lazyStart {
-				return nil
-			}
-			return manager.Start(ctx, manifest.ID)
-		},
 	}); err != nil {
 		_ = manager.Unregister(context.Background(), manifest.ID)
 		return err
@@ -88,7 +82,6 @@ func UnregisterExternalParser(descriptor ParserDescriptor) {
 type externalParserRegistration struct {
 	descriptor ParserDescriptor
 	provider   connProvider
-	start      func(context.Context) error
 	manager    *Manager
 	pluginID   string
 }
@@ -122,9 +115,6 @@ func (r externalParserRegistration) CheckAvailable(bool, map[string]string) (boo
 	return true, ""
 }
 func (r externalParserRegistration) NewReader(ctx context.Context, _ docparser.ReaderDeps) (interfaces.DocReader, error) {
-	if err := r.start(ctx); err != nil {
-		return nil, err
-	}
 	conn := r.provider.Conn()
 	if conn == nil {
 		return nil, fmt.Errorf("parser plugin %q is not running", r.descriptor.EngineName)

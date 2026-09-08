@@ -69,6 +69,7 @@ export interface ConnectorMeta {
   name: string
   description: string
   icon: string
+  docs_url?: string
   priority: number
   auth_type: string
   capabilities: string[]

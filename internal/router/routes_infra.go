@@ -227,8 +227,14 @@ func RegisterWebSearchProviderRoutes(
 func RegisterPluginRoutes(r *gin.RouterGroup, h *handler.PluginHandler, g *rbacGuards) {
 	plugins := g.apiKeyGroup(r.Group("/plugins"), apiKeyFullAccess())
 	{
+		// List loaded plugins with trust level and state — Admin+
+		plugins.GET("", g.Admin(), h.List)
+		// Update a plugin's deployment trust level — Admin+
+		plugins.PUT("/trust", g.Admin(), h.SetTrust)
 		// Rescan plugin directories and incrementally load new plugins — Admin+
 		plugins.POST("/rescan", g.Admin(), h.Rescan)
+		// Force-restart one plugin's runtime (recovery / image refresh) — Admin+
+		plugins.POST("/restart", g.Admin(), h.Restart)
 	}
 }
 

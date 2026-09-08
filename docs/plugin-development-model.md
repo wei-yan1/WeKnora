@@ -133,7 +133,7 @@ func (myModel) ChatStream(ctx context.Context, req pluginapi.ChatRequest, emit f
 }
 ```
 
-`StreamChunk` 除 `Content` 外还带 `ReasoningContent`（思考链内容）。对接 OpenAI o1、DeepSeek reasoner、MiMo 等 **reasoning 类模型**时，流式响应里模型会先吐 `reasoning_content` 再吐正文，插件应把两者都回传，否则宿主/前端会丢失思考过程：
+`StreamChunk` 除 `Content` 外还带 `ReasoningContent`（思考链内容）。对接 **reasoning（思考链）类模型**时，流式响应里模型会先吐 `reasoning_content` 再吐正文，插件应把两者都回传，否则宿主/前端会丢失思考过程：
 
 ```go
 emit(pluginapi.StreamChunk{
@@ -143,6 +143,10 @@ emit(pluginapi.StreamChunk{
 ```
 
 > 注意：`ChatResult`（非流式）和 `StreamChunk`（流式）都**必须**保留 `ReasoningContent`，且多轮对话中要把上一轮 assistant 的 `reasoning_content` 原样回传（部分供应商要求，否则以 400 拒绝）。
+
+### 思考开关（`ChatOptions.Thinking`）
+
+模型请求带 `ChatRequest.Options.Thinking`（`bool`）——宿主的统一思考开关，用户在对话页开启「深度思考」时为 `true`。插件据此决定是否给上游开启思考（参数格式由插件自行转换），并把上游返回的思考内容经 `ReasoningContent` 回传。配合 `model_ui.features` 声明 `thinking`，前端才会显示思考开关。
 
 ## 5. `plugin.yaml` 示例
 
@@ -163,25 +167,109 @@ capabilities:
   - vllm
   - asr
 
+# model_ui 可选：声明附加能力（features）与宿主公共字段显示策略（host_fields）。
+# 详见第 5.1 节。
+model_ui:
+  features:
+    - thinking                     # 支持思考（reasoning）
+    - streaming                    # 支持流式输出
+  host_fields:
+    base_url:
+      mode: required               # 必填
+      default: https://api.example.com/v1
+    api_key:
+      mode: required
+    custom_headers:
+      mode: optional               # 显示、可不填
+    supports_vision:
+      mode: hidden                 # 不显示
+    max_concurrency:
+      mode: optional
+
 metadata:
   provider: mymodel                # 宿主路由用的 provider 名（与 id 不同时用这个）
 
-config:
-  - key: api_key
-    type: string
-    description: 模型服务 API Key
-    required: true
-    secret: true
-  - key: base_url
-    type: string
-    description: 模型服务地址
-    required: true
+config_schema:
+  type: object
+  properties:
+    settings:
+      type: object
+      properties:
+        response_format:            # 插件专属配置字段（示例，前端自动渲染成下拉框）
+          type: string
+          enum: [text, json]
+          default: text
+    credentials:
+      type: object
+      required: [api_key]
+      properties:
+        api_key:
+          type: string
+          secret: true
+          description: 模型服务 API Key
 
 permissions:
   network: allowlist                # 模型插件通常需要出站调用模型服务
   allowed_destinations:
     - "api.example.com"
 ```
+
+### 运行方式与网络声明（黑盒约定）
+
+插件通过 `entrypoint` 声明启动方式：可执行文件，或 `docker://镜像`。通过 `permissions.network` 声明网络范围：`none` 或 `allowlist` + `allowed_destinations`（模型插件通常需要出站调用模型服务，用 `allowlist`）。出站请求必须经 `pluginapi.NewPluginHTTPClient()` 发起（读取宿主注入的网络策略），不要用裸 `http.Client`，否则白名单不生效。
+
+实际运行隔离方式（进程 / 容器、断网、出口代理）由宿主部署环境决定；插件作者不需要实现或配置 Runtime Agent / Docker Socket / 镜像校验。
+
+### 5.1 `model_ui`：声明附加能力与公共字段显示策略
+
+`model_ui` 是模型插件**可选**的 UI 声明块，让插件在不改动前端的前提下，控制自己在模型编辑页上呈现出的「能力」与「公共字段」。它由宿主在插件装载时读取，经 `/models/providers` 接口透传给前端。
+
+#### `features` —— 附加能力（区别于 `capabilities`）
+
+- `capabilities`：这个插件**提供哪些模型类型**（`chat` / `embedding` / `rerank` / `vllm` / `asr`）。
+- `features`：这个模型**额外支持哪些能力**，与模型类型正交。
+
+常见取值：
+
+| feature | 含义 |
+|---|---|
+| `thinking` | 支持思考（reasoning / 思考链） |
+| `streaming` | 支持流式输出 |
+| `vision` | 支持视觉/多模态输入 |
+| `tools` | 支持工具调用 |
+
+#### `host_fields` —— 宿主公共字段的显示策略
+
+宿主模型表单里有一批「公共字段」：Base URL、API Key、自定义 Header、视觉能力、并发上限。内置 provider 的显隐由前端硬编码，而**插件可以通过 `host_fields` 自行声明每个字段的显示方式**，无需修改前端。
+
+支持的 key（snake_case，与 `config_schema` 约定一致）：
+
+| key | 对应表单字段 |
+|---|---|
+| `base_url` | Base URL |
+| `api_key` | API Key |
+| `custom_headers` | 自定义 HTTP Header |
+| `supports_vision` | 视觉能力开关 |
+| `max_concurrency` | 并发上限 |
+
+每个字段的 `mode` 取值为：
+
+| mode | 含义 |
+|---|---|
+| `hidden` | 不显示 |
+| `optional` | 显示，可不填 |
+| `required` | 显示，参与必填校验（label 带红色星号） |
+| `readonly` | 显示但不可修改 |
+
+`default` 用于给字段注入默认值（当前仅 `base_url` 在新建模型、且该字段为空时自动填入）。
+
+**行为约定：**
+
+- 未声明 `host_fields` 的插件，公共字段沿用默认行为（`base_url` / `api_key` 显示、`custom_headers` 隐藏、`supports_vision` 随模型类型显示、`max_concurrency` 显示），**向后兼容已有插件**。
+- `host_fields` 只对 `source=plugin` 的插件生效；内置 provider 的显隐逻辑保持不变，不受影响。
+- 插件自定义字段仍走 `config_schema.settings` → `configFields` → 前端 `SchemaFieldInput` 动态渲染，与 `host_fields` 互不重叠。
+
+**透传链路**：`Manifest.model_ui` → `ExternalModelInfo` → `ModelProviderDTO`（`features` + `hostFields`）→ 前端 `ModelProviderOption`。当前 `features` 已完成整条链路透传，编辑页的能力标识与聊天场景的「思考开关」展示留作后续前端消费。
 
 ## 6. 宿主如何调用模型插件（重要：调用期解析机制）
 

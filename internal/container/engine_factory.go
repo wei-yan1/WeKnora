@@ -129,13 +129,19 @@ func vectorStoreToRetrieverConfig(store types.VectorStore) pluginapi.RetrieverSt
 	for k, v := range cc.Extra {
 		settings[k] = v
 	}
+	credentials := map[string]any{
+		"username": cc.Username,
+		"password": cc.Password,
+		"api_key":  cc.APIKey,
+	}
+	// 合并加密存储的动态凭证字段（ExtraCredentials）回 Credentials，让插件
+	// 拿到它声明的任意凭证字段名（如 token）。
+	for k, v := range cc.ExtraCredentials {
+		credentials[k] = v
+	}
 	cfg := pluginapi.RetrieverStoreConfig{
-		Settings: settings,
-		Credentials: map[string]any{
-			"username": cc.Username,
-			"password": cc.Password,
-			"api_key":  cc.APIKey,
-		},
+		Settings:    settings,
+		Credentials: credentials,
 		IndexConfig: map[string]any{},
 	}
 	if b, err := json.Marshal(store.IndexConfig); err == nil {

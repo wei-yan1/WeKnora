@@ -583,6 +583,7 @@ export default {
     connectionFailed: 'Подключение не удалось',
     isRequired: 'обязательно для заполнения',
     credentialsLabel: 'учётные данные',
+    pluginSettingsLabel: 'Настройки плагина',
     gitlab: {
       baseUrl: 'URL GitLab', accessToken: 'Персональный токен доступа', projects: 'Проекты GitLab',
       projectsHint: 'Укажите ID проекта или путь в пространстве имён (например group/project), а также при необходимости ветку и каталоги.',

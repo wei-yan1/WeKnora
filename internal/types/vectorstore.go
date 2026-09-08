@@ -221,6 +221,12 @@ type ConnectionConfig struct {
 	// leave this empty. It is tagged json:"-" so the default reflection marshal
 	// skips it — the custom marshalers flatten it explicitly.
 	Extra map[string]any `json:"-" yaml:"-"`
+	// ExtraCredentials captures external-plugin credential fields (declared
+	// secret in config_schema.credentials). Kept separate from Extra so they can
+	// be encrypted at rest as a whole, mirroring DataSourceConfig.Credentials.
+	// The service layer moves sensitive Extra fields here before persist; the
+	// engine factory merges them back into Credentials at runtime.
+	ExtraCredentials map[string]any `json:"extra_credentials,omitempty" yaml:"extra_credentials,omitempty"`
 }
 
 // connectionConfigFixedFields is the set of top-level JSON keys that map to
@@ -231,6 +237,7 @@ var connectionConfigFixedFields = map[string]struct{}{
 	"insecure_skip_verify": {}, "host": {}, "port": {}, "use_tls": {},
 	"grpc_address": {}, "scheme": {}, "database": {},
 	"use_default_connection": {}, "http_port": {}, "version": {},
+	"extra_credentials": {},
 }
 
 // MarshalJSON flattens Extra into the top-level JSON object so dynamic plugin
@@ -282,13 +289,39 @@ func (c *ConnectionConfig) UnmarshalJSON(b []byte) error {
 }
 
 // Value implements the driver.Valuer interface.
-// Encrypts Password and APIKey before persisting to database.
+// Encrypts Username, Password, APIKey and any ExtraCredentials before persisting
+// to database. ExtraCredentials is encrypted field-by-field (mirroring
+// DataSourceConfig.Credentials) so plugin-declared dynamic credential fields
+// never reach the DB in plain text.
 func (c ConnectionConfig) Value() (driver.Value, error) {
-	return utils.MarshalWithSecrets(c, "password", "api_key")
+	out := c
+	if len(out.ExtraCredentials) > 0 {
+		key := utils.GetAESKey()
+		enc := make(map[string]any, len(out.ExtraCredentials))
+		for k, v := range out.ExtraCredentials {
+			s, ok := v.(string)
+			if !ok || s == "" {
+				enc[k] = v
+				continue
+			}
+			if key == nil {
+				return nil, fmt.Errorf("refusing to persist plaintext credential %q: SYSTEM_AES_KEY is not configured", k)
+			}
+			e, err := utils.EncryptAESGCM(s, key)
+			if err != nil {
+				return nil, fmt.Errorf("encrypt retriever credential %q: %w", k, err)
+			}
+			enc[k] = e
+		}
+		out.ExtraCredentials = enc
+	}
+	return utils.MarshalWithSecrets(out, "username", "password", "api_key")
 }
 
 // Scan implements the sql.Scanner interface.
-// Decrypts Password and APIKey after loading from database.
+// Decrypts Username, Password, APIKey and ExtraCredentials after loading from
+// database. ExtraCredentials decryption is lenient: plaintext (no cipher prefix)
+// is returned as-is, so pre-migration rows keep working.
 func (c *ConnectionConfig) Scan(value interface{}) error {
 	if value == nil {
 		return nil
@@ -297,7 +330,55 @@ func (c *ConnectionConfig) Scan(value interface{}) error {
 	if !ok {
 		return nil
 	}
-	return utils.UnmarshalWithSecrets(b, c, "password", "api_key")
+	if err := utils.UnmarshalWithSecrets(b, c, "username", "password", "api_key"); err != nil {
+		return err
+	}
+	if len(c.ExtraCredentials) > 0 {
+		for k, v := range c.ExtraCredentials {
+			if s, ok := v.(string); ok {
+				if plain, ok := utils.DecryptStoredSecretLenient(s); ok {
+					c.ExtraCredentials[k] = plain
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// PartitionCredentials moves Extra fields declared sensitive by the engine
+// type's config schema into ExtraCredentials, so they are encrypted at rest
+// instead of persisted in the flattened (plain-text) Extra. Idempotent: fields
+// already in ExtraCredentials are left alone. Called by the service layer
+// before persisting an external retriever store.
+func (c *ConnectionConfig) PartitionCredentials(engineType RetrieverEngineType) {
+	if len(c.Extra) == 0 {
+		return
+	}
+	var sensitive map[string]bool
+	for _, vt := range GetVectorStoreTypes() {
+		if vt.Type == string(engineType) {
+			sensitive = make(map[string]bool)
+			for _, f := range vt.ConnectionFields {
+				if f.Sensitive {
+					sensitive[f.Name] = true
+				}
+			}
+			break
+		}
+	}
+	if len(sensitive) == 0 {
+		return
+	}
+	for key := range c.Extra {
+		if !sensitive[key] {
+			continue
+		}
+		if c.ExtraCredentials == nil {
+			c.ExtraCredentials = make(map[string]any)
+		}
+		c.ExtraCredentials[key] = c.Extra[key]
+		delete(c.Extra, key)
+	}
 }
 
 // GetEndpoint returns a normalized endpoint string for duplicate detection.

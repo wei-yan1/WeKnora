@@ -16,11 +16,11 @@ import (
 // datasource registry without adding a connector-specific branch to the
 // application. The manifest ID is the default connector type; metadata can
 // override it for packages that expose a human-readable plugin ID.
-func RegisterExternalDataSource(manager *Manager, registry *datasource.ConnectorRegistry, manifest Manifest, runtime Runtime, lazyStart bool) (string, error) {
-	return registerExternalDataSource(manager, registry, manifest, runtime, lazyStart, "")
+func RegisterExternalDataSource(manager *Manager, registry *datasource.ConnectorRegistry, manifest Manifest, runtime Runtime) (string, error) {
+	return registerExternalDataSource(manager, registry, manifest, runtime, "")
 }
 
-func registerExternalDataSource(manager *Manager, registry *datasource.ConnectorRegistry, manifest Manifest, runtime Runtime, lazyStart bool, sourceDir string) (string, error) {
+func registerExternalDataSource(manager *Manager, registry *datasource.ConnectorRegistry, manifest Manifest, runtime Runtime, sourceDir string) (string, error) {
 	if manifest.ExtensionType != ExtensionDataSource {
 		return "", fmt.Errorf("plugin %q is not a datasource", manifest.ID)
 	}
@@ -38,11 +38,6 @@ func registerExternalDataSource(manager *Manager, registry *datasource.Connector
 		}
 	}
 	if err := registry.RegisterFactory(connectorType, func(ctx context.Context, scope datasource.ConnectorScope, config *types.DataSourceConfig) (datasource.ConnectorLease, error) {
-		if lazyStart {
-			if err := manager.Start(ctx, manifest.ID); err != nil {
-				return nil, err
-			}
-		}
 		invocationLease, err := manager.AcquireInvocation(ctx, manifest.ID)
 		if err != nil {
 			return nil, err
@@ -54,20 +49,28 @@ func registerExternalDataSource(manager *Manager, registry *datasource.Connector
 			return nil, fmt.Errorf("plugin %q is not running", manifest.ID)
 		}
 		client := pluginapi.NewDataSourcePluginClient(conn)
-		var streaming pluginapi.DataSourceStreamingPluginClient
-		if candidate, ok := client.(pluginapi.DataSourceStreamingPluginClient); ok {
-			streaming = candidate
-		}
-		return processConnectorLease{release: release, generation: generation, connector: &GRPCConnectorProxy{
+		base := &GRPCConnectorProxy{
 			ConnectorType:     connectorType,
 			Client:            client,
-			StreamingClient:   streaming,
 			ConfigSchema:      manifest.ConfigSchema,
 			Invocation:        invocationFromScope(scope),
 			RuntimeGeneration: generation,
 			RuntimeContext:    invocationLease.Context,
 			GenerationValid:   func(value uint64) bool { return manager.GenerationValid(manifest.ID, value) },
-		}}, nil
+		}
+		// A plugin opts into the streaming sync path only by declaring the
+		// "streaming" capability. Without it, the proxy stays a plain
+		// datasource.Connector so the unary FetchAll/FetchIncremental path is
+		// used and the plugin's incremental cursor round-trips correctly.
+		var connector datasource.Connector = base
+		if manifestSupportsStreaming(manifest) {
+			streaming, ok := client.(pluginapi.DataSourceStreamingPluginClient)
+			if !ok {
+				return nil, fmt.Errorf("plugin %q declares streaming but exposes no streaming client", manifest.ID)
+			}
+			connector = &GRPCStreamingConnectorProxy{GRPCConnectorProxy: base, StreamingClient: streaming}
+		}
+		return processConnectorLease{release: release, generation: generation, connector: connector}, nil
 	}); err != nil {
 		_ = manager.Unregister(context.Background(), manifest.ID)
 		return "", err
@@ -79,9 +82,9 @@ func registerExternalDataSource(manager *Manager, registry *datasource.Connector
 	datasource.RegisterExternalConnectorMetadata(meta)
 	// A local (relative) icon is served by the host from the plugin directory;
 	// record its absolute path so the icon endpoint can stream it.
-	if iconFile, ok := resolveLocalIconFile(sourceDir, manifestIconValue(manifest)); ok {
+	registerPluginIconFile(sourceDir, manifest, func(iconFile string) {
 		datasource.RegisterExternalConnectorIconFile(connectorType, iconFile)
-	}
+	})
 	return connectorType, nil
 }
 
@@ -110,6 +113,50 @@ func connectorIconURL(connectorType string) string {
 	return "/api/v1/datasource/icon/" + url.PathEscape(connectorType)
 }
 
+// registerPluginIconFile resolves a plugin-bundled local icon and invokes
+// register with its absolute path. Returns false when the icon is absent or a
+// remote URL, in which case the caller uses the URL directly or a placeholder.
+// This centralizes the resolve+register step shared by datasource / web search /
+// retriever so the icon plumbing is not re-implemented per extension.
+func registerPluginIconFile(sourceDir string, manifest Manifest, register func(string)) bool {
+	iconFile, ok := resolveLocalIconFile(sourceDir, manifestIconValue(manifest))
+	if !ok {
+		return false
+	}
+	register(iconFile)
+	return true
+}
+
+// manifestSupportsStreaming reports whether the manifest declares the
+// "streaming" capability, which opts a datasource plugin into the streaming
+// sync path (FetchStream). Unary-only plugins omit it and stay on the
+// FetchAll/FetchIncremental path so their incremental cursor round-trips.
+func manifestSupportsStreaming(manifest Manifest) bool {
+	return hasCapability(manifest.Capabilities, "streaming")
+}
+
+// hasCapability reports whether the capability list contains the given value.
+func hasCapability(capabilities []string, want string) bool {
+	for _, c := range capabilities {
+		if c == want {
+			return true
+		}
+	}
+	return false
+}
+
+// excludeCapability returns the capability list without the given value. It
+// hides runtime-only capabilities (like "streaming") from user-facing metadata.
+func excludeCapability(capabilities []string, drop string) []string {
+	out := make([]string, 0, len(capabilities))
+	for _, c := range capabilities {
+		if c != drop {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // ConnectorMetadataFromManifest derives connector metadata from a plugin
 // manifest. Built-in connectors live in datasource.ConnectorMetadataRegistry;
 // external plugins flow through this helper so adding a plugin never requires
@@ -119,7 +166,7 @@ func ConnectorMetadataFromManifest(manifest Manifest, connectorType string) data
 		Type:         connectorType,
 		Name:         manifest.Name,
 		AuthType:     "none",
-		Capabilities: manifest.Capabilities,
+		Capabilities: excludeCapability(manifest.Capabilities, "streaming"),
 		ConfigSchema: manifest.ConfigSchema,
 		External:     true,
 	}
@@ -128,6 +175,9 @@ func ConnectorMetadataFromManifest(manifest Manifest, connectorType string) data
 	}
 	if v, ok := manifest.Metadata["description"].(string); ok {
 		meta.Description = v
+	}
+	if v, ok := manifest.Metadata["docs_url"].(string); ok {
+		meta.DocsURL = strings.TrimSpace(v)
 	}
 	if v, ok := manifest.Metadata["icon"].(string); ok {
 		meta.Icon = v

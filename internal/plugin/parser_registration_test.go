@@ -73,7 +73,7 @@ func TestExternalParserRegistrationUsesExistingDocparserRegistry(t *testing.T) {
 	}
 	runtime := &parserTestRuntime{conn: conn}
 	manager := NewManager("")
-	require.NoError(t, RegisterExternalParser(manager, manifest, runtime, descriptor, false))
+	require.NoError(t, RegisterExternalParser(manager, manifest, runtime, descriptor))
 	t.Cleanup(func() {
 		UnregisterExternalParser(descriptor)
 		_ = manager.Unregister(context.Background(), manifest.ID)

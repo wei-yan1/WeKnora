@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"sync"
 
@@ -76,6 +77,13 @@ func (r *GRPCRetrieverRepository) ensureSession(ctx context.Context) (*session, 
 		client, handle, generation, err := r.openSession(ctx, r.config)
 		if err != nil {
 			return nil, err
+		}
+		// openSession 在返回前已释放调用租约，runtime 可能在此期间重启，使
+		// 返回的 store_handle 属于已失效的 generation。发布前复核一次：失效则
+		// 关闭旧 handle 并报错，下次调用会重新打开（懒重建自愈）。
+		if r.genValid != nil && !r.genValid(generation) {
+			_, _ = client.CloseStore(context.Background(), &pluginproto.RetrieverCloseStoreRequest{StoreHandle: handle})
+			return nil, errors.New("retriever runtime restarted during session open; retry")
 		}
 		s := &session{client: client, handle: handle}
 		r.mu.Lock()
@@ -284,9 +292,14 @@ func (r *GRPCRetrieverRepository) Retrieve(ctx context.Context, params types.Ret
 	if resp.GetError() != "" {
 		return nil, errors.New(resp.GetError())
 	}
+	// 宿主把检索类型映射为 MatchType，而不是让插件返回 WeKnora 内部枚举。
+	matchType := types.MatchTypeEmbedding
+	if rt == types.KeywordsRetrieverType {
+		matchType = types.MatchTypeKeywords
+	}
 	hits := make([]*types.IndexWithScore, 0, len(resp.GetHits()))
 	for _, hit := range resp.GetHits() {
-		hits = append(hits, hitToIndexWithScore(hit))
+		hits = append(hits, hitToIndexWithScore(hit, matchType))
 	}
 	// Sort deterministically: score descending, then ID ascending as a
 	// tiebreaker. RRF fusion upstream derives rank from slice position (see
@@ -328,8 +341,15 @@ func embeddingFor(params map[string]any, sourceID string) ([]float32, bool) {
 	if params == nil {
 		return nil, false
 	}
-	em, ok := params["embedding"].(map[string][]float32)
+	raw, present := params["embedding"]
+	if !present {
+		return nil, false
+	}
+	em, ok := raw.(map[string][]float32)
 	if !ok {
+		// 类型不匹配会被调用方当作"无 embedding"，使存储估算偏小且无告警；
+		// 记录诊断，便于发现上游把 embedding 传成了其他类型。
+		log.Printf("[retriever] embedding param has unexpected type %T; storage estimate will be underestimated", raw)
 		return nil, false
 	}
 	v, ok := em[sourceID]
@@ -363,7 +383,7 @@ func stableRecordID(info *types.IndexInfo) string {
 	return info.ID
 }
 
-func hitToIndexWithScore(hit *pluginproto.RetrieverHit) *types.IndexWithScore {
+func hitToIndexWithScore(hit *pluginproto.RetrieverHit, matchType types.MatchType) *types.IndexWithScore {
 	meta := hit.GetMetadata()
 	if meta == nil {
 		meta = map[string]string{}
@@ -378,7 +398,7 @@ func hitToIndexWithScore(hit *pluginproto.RetrieverHit) *types.IndexWithScore {
 		TagID:           meta["tag_id"],
 		Score:           hit.GetScore(),
 		IsEnabled:       meta["is_enabled"] == "true",
-		MatchType:       types.MatchTypeEmbedding,
+		MatchType:       matchType,
 	}
 }
 

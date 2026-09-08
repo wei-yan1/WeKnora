@@ -123,6 +123,10 @@ func (s *vectorStoreService) CreateStore(ctx context.Context, store *types.Vecto
 		}
 	}
 
+	// 5.5. 把外部插件声明为 secret 的动态凭证字段从 Extra 分离到
+	// ExtraCredentials，确保它们走加密存储而不是摊平的明文 Extra。
+	store.ConnectionConfig.PartitionCredentials(store.EngineType)
+
 	// 6. Persist
 	logger.Infof(ctx, "Creating vector store: tenant=%d, name=%s, engine=%s",
 		store.TenantID, secutils.SanitizeForLog(store.Name), store.EngineType)

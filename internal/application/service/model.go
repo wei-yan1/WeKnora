@@ -83,6 +83,35 @@ func (s *modelService) validatePluginModelConfig(ctx context.Context, model *typ
 	return provider.ValidateExternalModelConfig(ctx, model.Parameters.Provider, config)
 }
 
+// RepushModelConfigs re-delivers the saved configuration (api_key, base_url,
+// extra_config) of every plugin-backed model for the given provider to the
+// model plugin. Model plugins cache configuration in-process after the
+// one-shot ValidateConfig at save time; a plugin restart empties that cache,
+// so this is invoked by the plugin manager on every (re)start path.
+//
+// It is best-effort and returns the first error it hit without failing the
+// plugin lifecycle: a failed re-push degrades to the previous behaviour (the
+// plugin serves the model with an empty config until the admin re-saves it).
+func (s *modelService) RepushModelConfigs(ctx context.Context, providerName string) error {
+	models, err := s.repo.ListBySource(ctx, types.ModelSourcePlugin)
+	if err != nil {
+		return fmt.Errorf("list plugin models: %w", err)
+	}
+	var firstErr error
+	for _, m := range models {
+		if m.Parameters.Provider != providerName {
+			continue
+		}
+		if err := s.validatePluginModelConfig(ctx, m); err != nil {
+			logger.Errorf(ctx, "[Plugin] repush config for model %q (provider %q) failed: %v", m.ID, providerName, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
 // resolveWeKnoraCloudCredentials 为 WeKnoraCloud 厂商模型补全 AppID/AppSecret。
 // 当模型自身参数中未存储凭证时，自动从空间配置中获取（SaveCredentials 保存的凭证）。
 func (s *modelService) resolveWeKnoraCloudCredentials(ctx context.Context, params *types.ModelParameters) (appID, appSecret string) {

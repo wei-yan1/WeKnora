@@ -76,7 +76,7 @@ rpc Parse(ParserRequest) returns (ParserResponse)
 
 关键语义约束（需插件自觉遵守，宿主不强制校验）：
 
-宿主在下游只认非空 `Error`（源码 `knowledge_process.go`：`result.Error != ""` 即判定解析失败并透出错误），不会自动拦截「未声明类型」「空内容」或「非 Markdown 残留」。因此这三条由插件自己保证：
+宿主在下游只认非空 `Error`（`Error != ""` 即判定解析失败并透出错误），不会自动拦截「未声明类型」「空内容」或「非 Markdown 残留」。因此这三条由插件自己保证：
 
 1. **只认 `metadata.file_types` 声明的类型**：对未声明的类型应返回错误，而不是静默输出错误文本。
 2. **主输出是 Markdown**：`MarkdownContent` 必须是可直接切分、向量化的 Markdown 文本，不能是二进制或富格式残留。
@@ -175,9 +175,15 @@ permissions:
   network: none                      # 解析插件一般无需联网，用 none 最安全
 ```
 
-### 必填校验（照源码 `manifest.go`）
+### 运行方式与网络声明（黑盒约定）
 
-- `metadata.file_types` **不能为空**——`Validate` 明确要求 parser 插件必须声明至少一个文件类型，否则插件无法通过装载校验。
+插件通过 `entrypoint` 声明自己的启动方式：可执行文件（相对 `plugin.yaml` 目录），或 `docker://镜像` 走容器运行。插件通过 `permissions.network` 声明自己需要的最大网络范围：`none`（默认，离线）或 `allowlist` + `allowed_destinations`。解析插件通常无需联网，用 `none` 最安全；确需出站时，请求必须经 `pluginapi.NewPluginHTTPClient()` 发起，不要用裸 `http.Client`——否则 `permissions.network` 白名单不生效。
+
+插件的实际运行隔离方式（进程 / 容器、是否断网、出口代理、Socket 权限交接）由宿主部署环境统一负责。插件作者不需要实现或配置 Runtime Agent、Docker Socket 或镜像校验，只需正确声明 Manifest 并使用 SDK 的受控客户端。
+
+### 必填校验
+
+- `metadata.file_types` **不能为空**——宿主装载校验明确要求 parser 插件必须声明至少一个文件类型，否则插件无法通过装载。
 
 ### 关于 `engine_name` 与配置 Schema
 

@@ -94,7 +94,10 @@ func TestGRPCConnectorProxyStreamsItemsAndCheckpoints(t *testing.T) {
 	defer conn.Close()
 	client := pluginapi.NewDataSourcePluginClient(conn)
 	streaming := client.(pluginapi.DataSourceStreamingPluginClient)
-	proxy := &GRPCConnectorProxy{ConnectorType: "test.streaming", Client: client, StreamingClient: streaming}
+	proxy := &GRPCStreamingConnectorProxy{
+		GRPCConnectorProxy: &GRPCConnectorProxy{ConnectorType: "test.streaming", Client: client},
+		StreamingClient:    streaming,
+	}
 	recorder := new(proxyStreamRecorder)
 	config := &types.DataSourceConfig{Type: "test.streaming", Settings: map[string]interface{}{}}
 	next, err := proxy.FetchStream(ctx, config, nil, recorder)

@@ -53,7 +53,7 @@ func TestExternalWebSearchRegistrationUsesTenantScopedFactory(t *testing.T) {
 	manifest := Manifest{APIVersion: APIVersionV1, ID: "test.external-search", Name: "External Search", Version: "1.0.0", ExtensionType: ExtensionSearch, ProtocolVersion: ProtocolVersionV1, Capabilities: []string{"search"}}
 	manager := NewManager("")
 	registry := infraWebSearch.NewRegistry()
-	providerType, err := RegisterExternalWebSearch(manager, registry, manifest, &webSearchTestRuntime{conn: conn}, false)
+	providerType, err := RegisterExternalWebSearch(manager, registry, manifest, &webSearchTestRuntime{conn: conn})
 	require.NoError(t, err)
 	require.Equal(t, manifest.ID, providerType)
 	t.Cleanup(func() { _ = manager.Unregister(context.Background(), manifest.ID); registry.Unregister(providerType) })

@@ -153,6 +153,15 @@ func servePlugin(ctx context.Context, address string, opts []grpc.ServerOption, 
 	if err != nil {
 		return fmt.Errorf("listen plugin: %w", err)
 	}
+	// A Unix control socket must be connectable by the non-root app user in the
+	// shared runtime group; 0660 lets the group (set via the setgid directory)
+	// connect without opening the socket to everyone.
+	if network == "unix" {
+		if err := os.Chmod(listenAddress, 0o660); err != nil {
+			_ = listener.Close()
+			return fmt.Errorf("chmod plugin socket: %w", err)
+		}
+	}
 	// Raise the gRPC message limits so a parser/data-source plugin can return
 	// documents with embedded images without hitting the 4MB default. The
 	// defaults are prepended so callers that pass an explicit limit still win.

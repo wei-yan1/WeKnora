@@ -15,7 +15,7 @@ import (
 // representation while migration happens incrementally.
 func RegisterBuiltins(manager *Manager, registry *datasource.ConnectorRegistry) error {
 	for _, connectorType := range registry.List() {
-		manifest := Manifest{APIVersion: APIVersionV1, ID: connectorType, Name: connectorType, Version: "1.0.0", ExtensionType: ExtensionDataSource, ProtocolVersion: ProtocolVersionV1, Permissions: Permissions{Network: NetworkEgress}}
+		manifest := Manifest{APIVersion: APIVersionV1, ID: connectorType, Name: connectorType, Version: "1.0.0", ExtensionType: ExtensionDataSource, ProtocolVersion: ProtocolVersionV1, Permissions: Permissions{}}
 		if err := manager.Register(manifest, &BuiltinRuntime{}); err != nil {
 			return err
 		}
@@ -32,7 +32,7 @@ func RegisterBuiltinParsers(manager *Manager) error {
 		manifest := Manifest{
 			APIVersion: APIVersionV1, ID: id, Name: engine.Name(), Version: "1.0.0",
 			ExtensionType: ExtensionParser, ProtocolVersion: ProtocolVersionV1,
-			Permissions:  Permissions{Network: NetworkEgress},
+			Permissions:  Permissions{},
 			Capabilities: []string{"parse"},
 			Metadata:     map[string]any{"engine_name": engine.Name(), "file_types": engine.FileTypes(false)},
 		}
@@ -50,7 +50,7 @@ func RegisterBuiltinWebSearch(manager *Manager, registry *infraWebSearch.Registr
 		manifest := Manifest{
 			APIVersion: APIVersionV1, ID: "search." + providerType, Name: providerType, Version: "1.0.0",
 			ExtensionType: ExtensionSearch, ProtocolVersion: ProtocolVersionV1,
-			Permissions: Permissions{Network: NetworkEgress}, Capabilities: []string{"search"},
+			Permissions: Permissions{}, Capabilities: []string{"search"},
 			Metadata: map[string]any{"provider_type": providerType},
 		}
 		if err := manager.Register(manifest, &BuiltinRuntime{}); err != nil {

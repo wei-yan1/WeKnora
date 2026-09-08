@@ -590,6 +590,16 @@ export interface ModelProviderOption {
     source?: string;
     // 插件声明的非保留配置字段，前端据此动态渲染表单。
     configFields?: ModelProviderConfigField[];
+    // 插件声明的附加模型能力（thinking / streaming / vision / tools）。
+    features?: string[];
+    // 插件声明的宿主公共字段显示策略（hidden/optional/required/readonly）。
+    hostFields?: Record<string, ModelProviderHostFieldSpec>;
+}
+
+// 宿主公共字段显示策略（对齐后端 types.HostFieldSpec）。
+export interface ModelProviderHostFieldSpec {
+    mode?: string; // hidden / optional / required / readonly
+    default?: string | number | boolean;
 }
 
 // 插件配置字段（模型扩展点）。结构对齐后端 ModelProviderDTO.ConfigFields，

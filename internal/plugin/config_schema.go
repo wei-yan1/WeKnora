@@ -56,11 +56,11 @@ func sectionFieldRequired(props map[string]any, required map[string]struct{}, ke
 }
 
 // credentialFieldAllowlist restricts which credential fields each extension
-// type may declare. The two extensions whose runtime config lands in a
-// plain-text extra_config bucket (Web Search / Model) must not pretend to
-// support arbitrary custom secrets — only their already-encrypted fixed keys.
-// Parser / DataSource / Retriever keep their own encrypted credential models
-// and are intentionally absent from this map (no field restriction).
+// type may declare, so a secret never lands in a plain-text bucket. Web Search
+// and Model write runtime config into extra_config (only their fixed, encrypted
+// keys). Parser, DataSource and Retriever keep their own encrypted
+// nested-credential models (Retriever now encrypts dynamic ExtraCredentials) and
+// remain intentionally absent from this map (no field restriction).
 var credentialFieldAllowlist = map[string]map[string]bool{
 	ExtensionSearch: {"api_key": true},
 	ExtensionModel:  {"api_key": true, "app_secret": true},

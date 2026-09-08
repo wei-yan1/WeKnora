@@ -503,6 +503,7 @@ interface ConnectorDef {
   name?: string
   description?: string
   icon?: string
+  docsUrl?: string
   configSchema?: Record<string, any>
 }
 
@@ -677,6 +678,7 @@ const availableConnectors = computed<ConnectorDef[]>(() => {
       name: m.name,
       description: m.description,
       icon: m.icon,
+      docsUrl: m.docs_url,
       configSchema: m.config_schema,
     }))
   return [...connectorDefs.value, ...external]
@@ -1435,10 +1437,10 @@ const drawerConfirmText = computed(() => {
     @confirm="handleDrawerConfirm"
     @cancel="handleClose"
   >
-    <template v-if="form.type && getDatasourceIconUrl(form.type)" #headerIcon>
+    <template v-if="form.type && (currentDef?.icon || getDatasourceIconUrl(form.type))" #headerIcon>
       <img
-        :src="getDatasourceIconUrl(form.type)"
-        :alt="form.type"
+        :src="currentDef?.icon || getDatasourceIconUrl(form.type)"
+        :alt="currentDef ? connectorName(currentDef) : form.type"
         class="datasource-header-icon__img"
       >
     </template>
@@ -1524,6 +1526,30 @@ const drawerConfirmText = computed(() => {
       <template v-if="currentDef?.external">
         <section class="setting-drawer__section">
           <h4 class="setting-drawer__section-title">{{ t('datasource.sectionBasic') }}</h4>
+          <div v-if="currentDef?.docsUrl" class="inline-alert">
+            <t-icon name="info-circle-filled" class="inline-alert__icon" />
+            <span class="inline-alert__text">{{ t('datasource.docHint') }}</span>
+            <a
+              :href="currentDef.docsUrl"
+              target="_blank"
+              rel="noopener"
+              class="inline-alert__action doc-link"
+            >
+              {{ t('datasource.openDoc') }}
+              <t-icon name="link" class="link-icon" />
+            </a>
+          </div>
+          <p v-if="currentDef?.description" class="form-desc datasource-plugin-description">
+            {{ currentDef.description }}
+          </p>
+          <div class="form-item">
+            <label class="form-label required">{{ t('datasource.nameLabel') }}</label>
+            <t-input v-model="form.name" :placeholder="t('datasource.namePlaceholder')" />
+          </div>
+        </section>
+
+        <section v-if="schemaFields.length > 0" class="setting-drawer__section">
+          <h4 class="setting-drawer__section-title">{{ t('datasource.pluginSettingsLabel') }}</h4>
           <div v-for="field in schemaFields" :key="field.key" class="form-item">
             <label class="form-label">
               {{ field.label }}<span v-if="field.required" class="form-required"> *</span>
@@ -1737,7 +1763,7 @@ const drawerConfirmText = computed(() => {
         </div>
       </section>
 
-      <section class="setting-drawer__section">
+      <section v-if="!currentDef?.external" class="setting-drawer__section">
         <h4 class="setting-drawer__section-title">{{ t('datasource.credentialsLabel') }}</h4>
 
         <div v-if="isEdit && credentialsConfigured && !replaceCredentialsMode" class="form-item">
