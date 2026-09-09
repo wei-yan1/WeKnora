@@ -59,6 +59,10 @@ func (externalIngestRepo) FindByDataSourceExternalID(context.Context, uint64, st
 	return nil, nil
 }
 
+func (externalIngestRepo) FindAllByDataSourceExternalID(context.Context, uint64, string, string, string) ([]*types.Knowledge, error) {
+	return nil, nil
+}
+
 func (externalIngestRepo) HardDeleteKnowledge(context.Context, uint64, string) error { return nil }
 
 type externalIngestService struct {

@@ -215,6 +215,55 @@ func TestDataSourceRepositoryDeleteSoftDeletesOnSQLite(t *testing.T) {
 	assert.Equal(t, other.ID, untouched.ID)
 }
 
+func TestDataSourceRepositoryFinalizeSyncCommitsBothTables(t *testing.T) {
+	db := setupDataSourceRepoTestDB(t)
+	repo := NewDataSourceRepository(db).(*DataSourceRepository)
+	ctx := context.Background()
+
+	ds := &types.DataSource{
+		ID: "ds-finalize", TenantID: 1, KnowledgeBaseID: "kb-1",
+		Name: "Feishu", Type: types.ConnectorTypeFeishu,
+	}
+	log := &types.SyncLog{
+		ID: "log-finalize", DataSourceID: ds.ID, TenantID: 1,
+		Status: types.SyncLogStatusRunning,
+	}
+	require.NoError(t, repo.Create(ctx, ds))
+	require.NoError(t, NewSyncLogRepository(db).Create(ctx, log))
+
+	finished := time.Now().UTC()
+	ds.Status = types.DataSourceStatusActive
+	ds.LastSyncCursor = types.JSON(`{"connector_cursor":{"page":"2"}}`)
+	log.Status = types.SyncLogStatusSuccess
+	log.FinishedAt = &finished
+	log.ItemsCreated = 3
+	require.NoError(t, repo.FinalizeSync(ctx, ds, log))
+
+	var storedDS types.DataSource
+	var storedLog types.SyncLog
+	require.NoError(t, db.First(&storedDS, "id = ?", ds.ID).Error)
+	require.NoError(t, db.First(&storedLog, "id = ?", log.ID).Error)
+	assert.Equal(t, types.DataSourceStatusActive, storedDS.Status)
+	assert.Equal(t, `{"connector_cursor":{"page":"2"}}`, string(storedDS.LastSyncCursor))
+	assert.Equal(t, types.SyncLogStatusSuccess, storedLog.Status)
+	assert.Equal(t, 3, storedLog.ItemsCreated)
+	require.NotNil(t, storedLog.FinishedAt)
+}
+
+func TestDataSourceRepositoryFinalizeSyncRejectsNilInputs(t *testing.T) {
+	db := setupDataSourceRepoTestDB(t)
+	repo := NewDataSourceRepository(db).(*DataSourceRepository)
+	ctx := context.Background()
+
+	ds := &types.DataSource{ID: "ds-finalize-nil", TenantID: 1, KnowledgeBaseID: "kb-1"}
+	require.NoError(t, repo.Create(ctx, ds))
+
+	assert.Error(t, repo.FinalizeSync(ctx, nil, &types.SyncLog{ID: "l"}))
+	assert.Error(t, repo.FinalizeSync(ctx, ds, nil))
+	assert.Error(t, repo.FinalizeSync(ctx, &types.DataSource{}, &types.SyncLog{ID: "l"}))
+	assert.Error(t, repo.FinalizeSync(ctx, ds, &types.SyncLog{}))
+}
+
 func TestSyncLogRepositoryUpdateResultClearsErrorMessage(t *testing.T) {
 	db := setupDataSourceRepoTestDB(t)
 	repo := NewSyncLogRepository(db)

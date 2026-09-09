@@ -123,6 +123,49 @@ func (r *DataSourceRepository) UpdateSyncState(ctx context.Context, ds *types.Da
 	return nil
 }
 
+// FinalizeSync atomically commits a sync run's terminal state to both the data
+// source (status/cursor/result) and the sync log (status/result/finished_at) in
+// a single transaction. The two tables share the same *gorm.DB, so this is
+// all-or-nothing: a retry after a partial failure never observes a terminal
+// sync log alongside a stale data-source cursor.
+func (r *DataSourceRepository) FinalizeSync(ctx context.Context, ds *types.DataSource, log *types.SyncLog) error {
+	if ds == nil || ds.ID == "" {
+		return errors.New("data source is nil or has no id")
+	}
+	if log == nil || log.ID == "" {
+		return errors.New("sync log is nil or has no id")
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&types.DataSource{}).
+			Where("id = ?", ds.ID).
+			Updates(map[string]interface{}{
+				"status":           ds.Status,
+				"last_sync_at":     ds.LastSyncAt,
+				"last_sync_cursor": ds.LastSyncCursor,
+				"last_sync_result": ds.LastSyncResult,
+				"error_message":    ds.ErrorMessage,
+				"updated_at":       time.Now().UTC(),
+			}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&types.SyncLog{}).
+			Where("id = ?", log.ID).
+			Updates(map[string]interface{}{
+				"status":        log.Status,
+				"finished_at":   log.FinishedAt,
+				"items_total":   log.ItemsTotal,
+				"items_created": log.ItemsCreated,
+				"items_updated": log.ItemsUpdated,
+				"items_deleted": log.ItemsDeleted,
+				"items_skipped": log.ItemsSkipped,
+				"items_failed":  log.ItemsFailed,
+				"error_message": log.ErrorMessage,
+				"result":        log.Result,
+				"updated_at":    time.Now().UTC(),
+			}).Error
+	})
+}
+
 // Delete performs a soft delete
 func (r *DataSourceRepository) Delete(ctx context.Context, id string) error {
 	if id == "" {
