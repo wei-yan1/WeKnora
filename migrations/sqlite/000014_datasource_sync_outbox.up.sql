@@ -1,4 +1,4 @@
--- Mirrors versioned migration 000085 for Lite SQLite deployments.
+-- Mirrors versioned migration 000092 for Lite SQLite deployments.
 ALTER TABLE sync_logs ADD COLUMN task_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE sync_logs ADD COLUMN task_payload TEXT;
 ALTER TABLE sync_logs ADD COLUMN dispatched_at DATETIME;
