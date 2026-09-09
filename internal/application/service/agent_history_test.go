@@ -119,6 +119,23 @@ func TestBuildAssistantHistoryMessages_StripsThinkBlocks(t *testing.T) {
 	}
 }
 
+func TestAssistantHistoryScopesArtifactVersionsToHistoricalTurn(t *testing.T) {
+	for _, labels := range [][2]string{
+		{"本轮生成的文件", "该历史消息生成的文件"},
+		{"File generated this turn", "File generated in that historical turn"},
+	} {
+		body := "Done.\n\n" + labels[0] + ": ![deck](resource://AbCdEfGhIjKlMnOpQrStUv)"
+		message := &types.Message{Role: "assistant", Content: body}
+		history := buildAssistantHistoryMessages(message)
+		require.Len(t, history, 1)
+		require.Contains(t, history[0].Content, labels[1]+": ![deck](resource://AbCdEfGhIjKlMnOpQrStUv)")
+		require.Equal(t, body, message.Content, "stored display content must remain unchanged")
+	}
+	result := &types.ToolResult{Success: true, Output: "command completed", OutputFiles: []string{"sandbox:deck.pptx"}}
+	require.Equal(t, "command completed", toolCallOutput(types.ToolCall{Name: agenttools.ToolShellExec, Result: result}))
+	require.Contains(t, result.OutputFiles, "sandbox:deck.pptx")
+}
+
 // TestBuildAssistantHistoryMessages_ToolCallsExpandIntoOpenAIShape covers the
 // option-B replay: non-terminal tool calls from AgentSteps become proper
 // assistant_with_tool_calls + tool messages, and the canonical final answer is
@@ -250,6 +267,42 @@ func TestBuildAssistantHistoryMessages_ToolFailureSurfacesAsError(t *testing.T) 
 	}, got[1])
 }
 
+func TestBuildAssistantHistoryMessages_SkillScriptFailureKeepsStdout(t *testing.T) {
+	stdout := `{"chart":{"success":false,"error":{"error":"X轴字段不存在：工作项目"}}}`
+	msg := &types.Message{
+		Role:    "assistant",
+		Content: "I will retry with a different axis.",
+		AgentSteps: types.AgentSteps{
+			{
+				Iteration: 0,
+				Thought:   "Plot the chart.",
+				ToolCalls: []types.ToolCall{
+					{
+						ID:   "call_skill",
+						Name: agenttools.LegacyToolExecuteSkillScript,
+						Args: map[string]interface{}{"skill_name": "smart-charts", "script_path": "scripts/cli.py"},
+						Result: &types.ToolResult{
+							Success: false,
+							Output:  "=== Script Execution ===\n" + stdout,
+							Error:   "Script exited with code 1",
+							Data: map[string]interface{}{
+								"display_type": "shell_exec",
+								"stdout":       stdout,
+								"exit_code":    1,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	got := buildAssistantHistoryMessages(msg)
+	require.Len(t, got, 3)
+	assert.Equal(t, "tool", got[1].Role)
+	assert.Contains(t, got[1].Content, "X轴字段不存在：工作项目")
+	assert.Contains(t, got[1].Content, "Error: Script exited with code 1")
+}
+
 // TestFilterNonTerminalToolCalls confirms a legacy final_answer entry is
 // dropped — every other tool (KB search, web search, MCP tools…) must survive.
 func TestFilterNonTerminalToolCalls(t *testing.T) {
@@ -304,4 +357,29 @@ func TestBuildAssistantHistoryMessages_ReplaysReasoningContent(t *testing.T) {
 	// Tool message and final answer message must NOT carry reasoning_content.
 	assert.Empty(t, got[1].ReasoningContent)
 	assert.Empty(t, got[2].ReasoningContent)
+}
+
+func TestMCPProxyHistoryRetainsProtocolCallAndTarget(t *testing.T) {
+	msg := &types.Message{Role: "assistant", AgentSteps: types.AgentSteps{{ToolCalls: []types.ToolCall{{
+		ID: "proxy-id", Name: "call_mcp_tool",
+		Args: map[string]any{"tool_ref": "mcpt_ref", "arguments": map[string]any{"id": "42"}},
+		Target: &types.ToolCallTarget{
+			Name:        "mcp_orders_get",
+			Args:        map[string]any{"id": "42"},
+			ServiceName: "Orders",
+			ToolName:    "get",
+		},
+		Result: &types.ToolResult{Success: true, Output: "ok"},
+	}}}}}
+	data, err := json.Marshal(msg.AgentSteps)
+	require.NoError(t, err)
+	var restored types.AgentSteps
+	require.NoError(t, json.Unmarshal(data, &restored))
+	msg.AgentSteps = restored
+	require.Equal(t, "mcp_orders_get", restored[0].ToolCalls[0].Target.Name)
+	history := buildAssistantHistoryMessages(msg)
+	require.Len(t, history, 2)
+	require.Equal(t, "call_mcp_tool", history[0].ToolCalls[0].Function.Name)
+	require.Contains(t, history[0].ToolCalls[0].Function.Arguments, "tool_ref")
+	require.Equal(t, "proxy-id", history[1].ToolCallID)
 }
