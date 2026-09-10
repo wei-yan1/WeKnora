@@ -1,0 +1,15 @@
+version: 1
+student:
+  name: "（待填写：姓名）"
+  github_id: "wei-yan1"
+topic:
+  id: "4"
+  title: "知识网络与引导式学习"
+result:
+  type: code
+  url: "https://github.com/wei-yan1/WeKnora/tree/rhino-2026-final-4"
+repository:
+  url: "https://github.com/wei-yan1/WeKnora.git"
+  branch: "codex/knowledge-mastery"
+  commit: "cf58f44acfb07b77d971471ad485716f912095c8"
+  tag: "rhino-2026-final-4"
