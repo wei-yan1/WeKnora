@@ -2,6 +2,8 @@
 
 > 本文档聚焦 WeKnora 的**统一插件控制面 + 五大扩展点插件化**。它不是 WeKnora 项目总览，而是"插件框架"这一课题的交付说明：架构、插件从落盘到运行的完整生命周期、治理能力、五个扩展点的制作文档入口。
 
+> **已与上游同步**：本分支已合并上游 `Tencent/WeKnora` 的 `main` 分支共 203 个提交（同步点 `85b76d1a`），插件框架构建在同步后的代码底座之上，未与上游脱节。
+
 ## 实测验证
 
 本课题已在 **Docker 部署**（生产态 OCI 沙箱运行时）与**快速开发模式**（开发态进程级运行时）两种运行方式下，完成了五类扩展点插件的端到端实测：
@@ -13,7 +15,7 @@
 
 以上五类插件的完整实现位于独立仓库 [WeKnora-plugin](https://github.com/wei-yan1/WeKnora-plugin)，以独立仓库方式开发、无需改动主仓代码即可装载——这正是「扩展点插件化」的落地形态。
 
-五类扩展点均已端到端跑通，实测证据见第二节「验收达成与关键难题解法」与第九节运行截图，实机测试过程见文末「实机测试演示视频」。
+五类扩展点均已端到端跑通，实测证据见「验收达成与关键难题解法」与第九节运行截图，实机测试过程见文末「实机测试演示视频」。安全框架另在 Docker 部署下通过 **19 项端到端控制点验收**（权限分离 / 强隔离沙箱 / 断网实测 / Socket 移交 / 信任分级持久化 / 全链路连通），详见「端到端验收实测」。
 
 ---
 
@@ -26,7 +28,7 @@
 | # | 验收标准 | 实现机制 | 实测证据 | 详见 |
 |---|---|---|---|---|
 | 1 | 主仓之外的独立仓库插件，免改主仓代码即可装载，并完成一次完整数据同步 | 五类扩展点统一为「Manifest 声明 + 进程外 gRPC」；插件由五个 `WEKNORA_PLUGIN_DIR_*` 目录驱动发现，经 `ExtensionAdapterRegistry` 动态接线，业务侧既有注册表以 factory 模式挂入，**业务路径一行未改** | GitHub、钉钉、LocalDir 三个数据源插件以独立仓库 [WeKnora-plugin](https://github.com/wei-yan1/WeKnora-plugin) 维护，主仓零改动完成完整同步 | 第二、三、四节 |
-| 2 | 插件声明不联网时，运行期实际无法出站，尝试联网被拦截并记录 | 默认拒绝（默认 `offline`，需管理员显式授权）+ 信任只能收窄 manifest → 容器 `--network none` 无网卡 → 唯一出口是只读挂载的 egress 代理，在网络层校验白名单并审计；即便绕过 SDK 也在网络层兜底 | 见第五节网络策略设计与文末实机录像 | 第二、五、八节 |
+| 2 | 插件声明不联网时，运行期实际无法出站，尝试联网被拦截并记录 | 默认拒绝（默认 `offline`，需管理员显式授权）+ 信任只能收窄 manifest → 容器 `--network none` 无网卡 → 唯一出口是只读挂载的 egress 代理，在网络层校验白名单并审计；即便绕过 SDK 也在网络层兜底 | 19 项端到端实测全通过（含断网实测、白名单内放行/外拦截、SSRF 防护），每次放行与拦截均有审计留痕 | 第二、五、八节 |
 | 3 | 增量同步正确：源端仅变更一个文件时，只有该文件被重新处理 | cursor 契约（插件解释语义、宿主原样存取）+ Outbox 模式（先落库再投递）+ 双层分布式锁（防重复触发、防并发拉取） | GitHub、钉钉均验证「仅变更一个文件 → 只有该文件被重新处理」 | 第二、五节 |
 | 4 | 他人仅依据文档即可独立实现一个可运行的最简插件 | 五份独立完整文档（每扩展点一份）+ 协议级 conformance 自检入口 + 可复制模板目录 | 独立仓库五类插件均依据对应文档实现，作者无需阅读主仓源码 | 第六、七节 |
 
@@ -72,6 +74,48 @@
 4. **隔离等级与部署形态绑定**：`isolated` 依赖 OCI 容器硬隔离，仅在 **Docker 部署**下可用；快速开发模式采用进程级运行，最高只能提供 `trusted` 级别的协作式软约束（依赖 SDK 的 `GuardedHTTPClient`）——这也是 `trusted` 仅适用于受信任插件的原因。
 
 每一次放行与拦截都写审计（插件 ID + 目的地址 + 结果）；信任级别由管理员在统一控制面集中配置，插件与调用方都无法自行提升——多租户环境下，网络权限边界始终掌握在管理员手中。
+
+### 端到端验收实测（19 项全通过）
+
+在 Docker 部署环境下，使用自动化验收脚本对安全框架的关键控制点逐项实测（手段为 `docker inspect` + `psql` + 审计日志 + 管理 API），覆盖 6 组控制点：
+
+| 控制点 | 实测内容 | 手段 |
+|---|---|---|
+| ① 权限分离 | app 容器**无** `docker.sock`；runtime-agent **独占** `docker.sock` | `docker inspect` 挂载列表 |
+| ② 强隔离沙箱 | `network=none`、根文件系统只读、`cap-drop ALL`、`no-new-privileges`、`pids-limit 128`、`memory 512MB`、`cpus 1`、runtime 实例 label、plugin.id label —— 9 项全部符合 | `docker inspect` 容器配置 |
+| ③ 断网实测 | `network:none` 下容器内 `wget http://example.com` 返回 `bad address`，**无任何出网通路** | 容器内实际发起请求 |
+| ④ Socket 移交 | control socket 权限 `0660`、属组 `weknora-runtime`(GID 2000)、审计留痕 `socket-handover allowed=true` | `ls -la` + agent 审计日志 |
+| ⑤ 信任分级持久化 | 信任等级落库 `system_settings`；`offline / trusted / isolated` 三档齐备；重启不丢 | `psql` 查询 |
+| ⑥ 端到端连通 | isolated 插件经 agent 编排上线，`state=running`——宿主 ↔ agent ↔ 容器 ↔ socket 全链路贯通 | 管理 API |
+
+**结果：19 项全部 PASS，0 项 FAIL。**
+
+网络策略另有 4 项实测（第 20–23 项）：
+
+| 场景 | 审计记录（runtime-agent 日志） |
+|---|---|
+| 白名单内放行 | `destination=api.tavily.com:443 allowed=true reason=allowed by managed egress proxy` |
+| 白名单外拦截 | `destination=example.com:443 allowed=false reason=destination is not in manifest allowlist` |
+| SSRF 防护 | `allowed=false reason=DNS resolved to a private or link-local address`——域名解析到私网或链路本地地址即拒绝，防 DNS rebinding |
+| 信任矩阵 | 非法组合被拒装载：`trusted plugin cannot use OCI entrypoint` |
+
+审计日志原始样例：
+
+```text
+[plugin-audit] plugin=weknora.tarily123 action=socket-handover
+  destination=.../control/plugin.sock allowed=true
+  reason=control socket ownership transferred to runtime group
+
+[plugin-audit] plugin=weknora.tarily123 action=network
+  destination=api.tavily.com:443 allowed=false
+  reason=DNS resolved to a private or link-local address
+
+[plugin-audit] plugin=weknora.tarily123 action=network
+  destination=example.com:443 allowed=false
+  reason=destination is not in manifest allowlist
+```
+
+这组实测直接支撑验收标准第 2 条——**「不联网声明在运行期被强制执行，且每一次放行与拦截都可审计」**：不仅有配置层面的信任收敛，更有运行期的物理断网与网络层拦截证据。
 
 ---
 
@@ -498,6 +542,8 @@ docker run --rm \
 | `--memory 512m` / `--cpus 1` | 资源硬上限 |
 | `-v <control-dir>:/run/weknora:rw` | control socket 挂载（gRPC server 监听） |
 | `-v <egress-dir>:/run/weknora-egress:ro` | egress 代理 socket **只读**挂载——插件能 connect 但不能替换/删除 |
+
+上述参数已在 Docker 部署环境下经 `docker inspect` 逐项核验通过（见「端到端验收实测」）。
 
 **socket handover**（`local_docker_controller.go:167-198`）：插件进程在容器内 `listen` control socket 时是 root:root 0755（受 `--cap-drop ALL` 限制，chown 不出来），宿主侧 `handoverControlSocket` 循环等待 socket 出现后 **chown 到 GID 2000 + chmod 0660**——共享运行组（app / agent 同属 GID 2000）的成员才能 connect。这是"双容器共享卷 + 非 root 运行"的最小依赖。
 

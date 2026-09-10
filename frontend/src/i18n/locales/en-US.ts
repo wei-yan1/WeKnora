@@ -444,7 +444,7 @@ export default {
     importLocalDir: 'Import Local Directory',
     importLocalDirTitle: 'Import Local Directory',
     localDirLabel: 'Directory path',
-    localDirPlaceholder: 'e.g. C:\\Users\\MR\\Music or /data/docs',
+    localDirPlaceholder: 'e.g. C:\\Users\\your-name\\Music or /data/docs',
     localDirTip: 'Enter the absolute path of a directory on the server; its files will be synced continuously',
     localDirRequired: 'Please enter a directory path',
     addDocument: 'Add Document',

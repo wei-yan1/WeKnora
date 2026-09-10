@@ -50,9 +50,14 @@ services:
       - ./config/config.yaml:/app/config/config.yaml
       # Optional: mount custom skills directory (allows adding skills without rebuilding image)
       - ./skills/preloaded:/app/skills/preloaded
-      # 外部插件目录（ProcessRuntime：offline/trusted）。按扩展类型放宿主 /mnt/d/weknora-plugins/<type>/ 下，
-      # 二进制须为 Linux/amd64 且可执行。挂载目标与 .env 中 WEKNORA_PLUGIN_DIR_* 的 /mnt/d/ 路径保持一致。
-      - /mnt/d/weknora-plugins:/mnt/d/weknora-plugins:ro
+      # 外部插件目录（ProcessRuntime：offline/trusted）。按扩展类型放在 <HOST_DIR>/<type>/ 下，
+      # 二进制须为 Linux/amd64 且可执行。容器内挂载点（MOUNT_DIR）必须与 .env 中
+      # WEKNORA_PLUGIN_DIR_* 的取值前缀一致（默认 /app/plugins）。
+      # 默认挂载仓库内的 ./plugins，开箱即可用；若使用宿主其它目录，在 .env 里
+      # 显式指定这两个变量（WSL 下宿主路径形如 /mnt/<盘符>/<目录>），例如：
+      #   WEKNORA_PLUGIN_HOST_DIR=/srv/weknora-plugins
+      #   WEKNORA_PLUGIN_MOUNT_DIR=/srv/weknora-plugins
+      - ${WEKNORA_PLUGIN_HOST_DIR:-./plugins}:${WEKNORA_PLUGIN_MOUNT_DIR:-/app/plugins}:ro
       # 插件 runtime 共享目录（app 只读）：isolated 插件容器由 plugin-runtime agent 启动，
       # app 从这里连接 agent 的 Unix socket 与插件的 control socket。
       # 必须是宿主 bind 且三端（app/agent/docker daemon）使用同一字面路径：agent 会把
@@ -353,7 +358,7 @@ services:
       - WEKNORA_PLUGIN_RUNTIME_AGENT_SOCKET=/var/lib/weknora/plugin-runtime/agent.sock
       - WEKNORA_PLUGIN_RUNTIME_ROOT=/var/lib/weknora/plugin-runtime
       - WEKNORA_PLUGIN_RUNTIME_LOCAL_ROOT=/var/lib/weknora/plugin-runtime
-      - WEKNORA_PLUGIN_RUNTIME_AGENT_TOKEN=${WEKNORA_PLUGIN_RUNTIME_AGENT_TOKEN:-weknora-dev-token}
+      - WEKNORA_PLUGIN_RUNTIME_AGENT_TOKEN=${WEKNORA_PLUGIN_RUNTIME_AGENT_TOKEN:?WEKNORA_PLUGIN_RUNTIME_AGENT_TOKEN must be set in .env (app and plugin-runtime agent must share the same value)}
       - WEKNORA_CHAT_ATTACHMENT_TTL_HOURS=${WEKNORA_CHAT_ATTACHMENT_TTL_HOURS:-24}
       - WEKNORA_CHAT_ATTACHMENT_WAIT_TIMEOUT_SEC=${WEKNORA_CHAT_ATTACHMENT_WAIT_TIMEOUT_SEC:-60}
       - WEKNORA_CHAT_ATTACHMENT_OCR_CONCURRENCY=${WEKNORA_CHAT_ATTACHMENT_OCR_CONCURRENCY:-8}
@@ -431,8 +436,10 @@ services:
     environment:
       - WEKNORA_PLUGIN_RUNTIME_ROOT=/var/lib/weknora/plugin-runtime
       - WEKNORA_PLUGIN_RUNTIME_AGENT_SOCKET=/var/lib/weknora/plugin-runtime/agent.sock
-      # 生产必须设置强随机 token（app 与 agent 共用）；默认值仅用于本地开箱体验。
-      - WEKNORA_PLUGIN_RUNTIME_AGENT_TOKEN=${WEKNORA_PLUGIN_RUNTIME_AGENT_TOKEN:-weknora-dev-token}
+      # 必须显式设置（app 与 agent 共用同一值）；未设置时 compose 直接报错，
+      # 避免误用弱默认值。生成方式：openssl rand -hex 32
+      # 注意：修改后需同时重建 app 与 plugin-runtime 两个容器才会一致生效。
+      - WEKNORA_PLUGIN_RUNTIME_AGENT_TOKEN=${WEKNORA_PLUGIN_RUNTIME_AGENT_TOKEN:?WEKNORA_PLUGIN_RUNTIME_AGENT_TOKEN must be set in .env (app and plugin-runtime agent must share the same value)}
       # 镜像策略：development 允许任意 tag（本地开发）；生产去掉 development 并设置
       # WEKNORA_PLUGIN_IMAGE_ALLOWLIST（JSON: {"plugin_id":"image@sha256:..."}）。
       - WEKNORA_PLUGIN_IMAGE_POLICY=${WEKNORA_PLUGIN_IMAGE_POLICY:-development}

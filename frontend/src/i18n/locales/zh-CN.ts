@@ -6412,7 +6412,7 @@ export default {
     importLocalDir: '导入本地目录',
     importLocalDirTitle: '导入本地目录',
     localDirLabel: '目录路径',
-    localDirPlaceholder: '例如：C:\\Users\\MR\\Music 或 /data/docs',
+    localDirPlaceholder: '例如：C:\\Users\\你的用户名\\Music 或 /data/docs',
     localDirTip: '输入服务器上的本地目录绝对路径，系统将持续同步该目录下的文件',
     localDirRequired: '请输入目录路径',
     addDocument: '添加文档',
