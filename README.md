@@ -828,6 +828,84 @@ internal/router/routes_memory.go             ← 路由注册
 
 ---
 
+## 七、如何运行与验证
+
+### 7.1 环境要求
+
+| 组件 | 版本 | 说明 |
+|---|---|---|
+| Docker + Docker Compose | 24+ | 一键启动 PostgreSQL / Redis / docreader / app / frontend |
+| Go | **1.26.0**（见 `go.mod`） | 仅从源码编译或跑后端测试时需要 |
+| Node.js | 20+ | 仅前端本地开发与前端测试时需要 |
+
+本课题**没有引入任何新依赖**：不依赖 Neo4j，PostgreSQL 与桌面 Lite（SQLite）均可运行。
+
+### 7.2 启动（推荐：Docker 一键起）
+
+```bash
+git clone https://github.com/wei-yan1/WeKnora.git
+cd WeKnora
+git checkout <最终 Tag，见提交邮件>
+
+cp .env.example .env        # 按需填写模型配置
+docker compose up -d        # 首次构建需要数分钟
+```
+
+打开 `http://localhost`（默认端口 80，可用 `FRONTEND_PORT` 调整）。`.env` 至少要配一个对话模型与一个向量模型，否则 Wiki 生成与问答不可用；环境变量与模型接入的完整说明见仓库原有的 `README_CN.md`。
+
+**本地开发（可选）**：
+
+```bash
+make dev-start                              # scripts/dev.sh：Docker 依赖 + 本地后端/前端
+```
+
+该脚本依赖 bash，Windows 下请在 WSL 或 Git Bash 中执行，或分别启动：
+
+```bash
+go run ./cmd/server                          # 后端
+cd frontend && npm install && npm run dev    # 前端（Vite，默认 5173）
+```
+
+### 7.3 本课题特性的开启路径
+
+本课题的功能全部挂在 **Wiki / 知识图谱** 视图上，且引导视图**默认关闭**（见 3.1）：
+
+1. 新建知识库并上传文档，在知识库的索引策略中**开启 Wiki**（`wiki_enabled`）→ 等待 Wiki 页面与图谱生成；
+2. 进入该知识库的 **Wiki / 知识图谱** 视图，在工具栏打开**知识引导开关**；
+3. 打开任一 Wiki 页面并停留 ≥ 5 秒（`PAGE_VIEW_MIN_SECONDS`，低于此值视为误点不上报）→ 节点水位球随行为变化；
+4. **点击节点**：查看关系高亮、边界涟漪与「下一步推荐」（PPR 边界候选，含曝光与点击记录）；
+5. 与 Agent 对话后点击回答下方的**点赞**按钮 → 该次点赞按引用位置次线性分摊给被引用的文档；
+6. **个人知识画像**：查看明细 / 导出单页 HTML / 删除。删除只清空个人六张专用账本，**不触碰**检索重排数据与知识库内容。
+
+### 7.4 测试命令
+
+```bash
+# 本课题的后端测试：水位计算、邻居预热、点赞分摊、PPR 边界、同页去重、日桶读取
+go test -count=1 ./internal/application/service/mastery/... ./internal/application/repository/... -v
+
+# 全量后端测试
+go test ./...        # 等价于 make test
+
+# 前端：单测 + i18n 一致性 + 类型检查
+cd frontend
+npm install
+npm run test         # tsx --test
+npm run check-i18n   # 断言代码中引用的 i18n 键在五种语言包中都存在
+npm run type-check
+```
+
+**已知环境差异（如实说明）**：Windows 上全量 `go test ./...` 可能因 duckdb 的 msys2 工具链缺失、系统临时目录被占用而失败，与本课题代码无关。本课题相关的两个测试包在 **Windows / SQLite** 下整体通过；涉及 SQL 方言的多行 upsert、`excluded` 列与 `SUM(0)` 读取形状，已在**真实 PostgreSQL** 上以临时表 + 回滚单独验证（不触碰真实数据）。
+
+### 7.5 有效性验证
+
+| 方式 | 状态 | 说明 |
+|---|---|---|
+| **可回归的行为断言** | **已实现** | 7.4 的两组测试包，例如「6 次重复浏览 → 次数为 1、时长为 30」这条断言是「按天折叠」设计决策的守门人 |
+| **离线回放（时间切分）** | 数据基础就绪、回放任务未实现 | 见 6.4：`memory_mastery_daily`（用户 × 节点 × 事件类型 × 日期）与 `memory_guide_exposures`（展示 / 点击 / 有效浏览 + 位次）已按回放所需的口径写入 |
+| **小规模试用** | 可按 7.3 复现 | 按 7.3 操作一遍即可观察到「点亮」过程、边界推荐与画像导出结果 |
+
+---
+
 ## 附：可调参数总表
 
 **后端**（`internal/application/service/mastery/config.go`）
