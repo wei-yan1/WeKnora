@@ -5776,6 +5776,13 @@ export default {
       success: 'Copied to clipboard',
       failed: 'Copy failed, please copy manually'
     },
+    like: {
+      title: 'Like',
+      cancelTitle: 'Unlike',
+      success: 'Liked',
+      cancelled: 'Like removed',
+      noKnowledge: 'This answer has no linked knowledge to like'
+    },
     saveToKb: {
       emptyContent: 'Current response is empty, cannot save to knowledge base',
       editorOpened: 'Editor opened, please select a knowledge base and save'

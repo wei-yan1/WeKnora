@@ -1233,6 +1233,13 @@ export default {
       success: '已复制到剪贴板',
       failed: '复制失败，请手动复制'
     },
+    like: {
+      title: '点赞',
+      cancelTitle: '取消点赞',
+      success: '点赞成功',
+      cancelled: '已取消点赞',
+      noKnowledge: '这条回答没有可关联的知识，无法点赞'
+    },
     mcp: {
       discoverTools: "发现 MCP 工具",
       listServers: "查看 MCP 服务",
