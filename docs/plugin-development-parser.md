@@ -17,11 +17,17 @@ Parser 插件与其他四类一样，遵循同一套发现与生命周期协议�
 
 | 项 | Parser 插件取值 |
 |---|---|
-| `api_version` | `weknora.plugin/v1` |
-| `extension_type` | `parser` |
-| `protocol_version` | `v1` |
+| `api_version` | `weknora.plugin/v1`（必填） |
+| `id` | 必填，插件唯一 ID |
+| `name` | 必填，插件显示名称 |
+| `version` | 必填，插件版本 |
+| `extension_type` | `parser`（必填） |
+| `protocol_version` | `v1`（必填） |
+| `weknora_version` | 可选，宿主兼容范围，如 `>=0.7 <1.0` |
 | `entrypoint` | 必填，可执行文件或命令 |
 | 环境变量 | `WEKNORA_PLUGIN_ADDR`（宿主分配的监听地址） |
+
+> 完整字段说明（含 `capabilities`、`config_schema`、`permissions`、`metadata`）见 [数据源插件指南第 1 节](plugin-development-datasource.md#1-插件包结构)。
 
 启动后必须实现两个统一服务：
 
@@ -175,7 +181,7 @@ permissions:
   network: none                      # 解析插件一般无需联网，用 none 最安全
 ```
 
-### 运行方式与网络声明（黑盒约定）
+### 运行方式与网络声明
 
 插件通过 `entrypoint` 声明自己的启动方式：可执行文件（相对 `plugin.yaml` 目录），或 `docker://镜像` 走容器运行。插件通过 `permissions.network` 声明自己需要的最大网络范围：`none`（默认，离线）或 `allowlist` + `allowed_destinations`。解析插件通常无需联网，用 `none` 最安全；确需出站时，请求必须经 `pluginapi.NewPluginHTTPClient()` 发起，不要用裸 `http.Client`——否则 `permissions.network` 白名单不生效。
 
@@ -190,11 +196,11 @@ permissions:
 - **`metadata.engine_name` 是全局唯一注册键**：不能与内置引擎（`simple`、`builtin`、`anydoc`、`weknoracloud`、`mineru`、`mineru_cloud`、`paddleocr_vl`、`paddleocr_vl_cloud`）或其他插件的 `engine_name` 重名，否则 `RegisterEngine` 会以 `already registered` 拒绝装载。不填 `engine_name` 时回退为插件 `id`（如 `example.mypdfparser`），可用但建议显式声明语义化引擎名。
 - **外部 Parser 使用 `config_schema` 声明配置**：宿主会把 Schema 随引擎元数据返回，Parser 设置页据此动态渲染 `settings` 和 `credentials`。配置按稳定的插件 `id` 保存，多个插件可以使用同名字段而不会冲突。
 - **运行时仍复用 v1 `ParserEngineOverrides`**：宿主仅在调用当前外部 Parser 时，取该插件自己的已保存配置并写入 `ParserRequest.ParserEngineOverrides`。标量会转成字符串（`true`、`60`），数组/对象使用 JSON 字符串；插件应按自身 Schema 解析。每次上传提供的 per-upload overrides 优先级更高，可以覆盖租户保存值。
-- **统一使用 `config_schema`**：旧的简短 `config` 列表已移除，插件只应声明 `config_schema`，用 `settings`、`credentials`（Retriever 额外允许 `index_config`）分区表达配置，字段用 `type`、`title`、`description`、`default`、`enum`、`secret` 描述。`secret` 标记只允许出现在 `credentials` 分区，否则装载校验会拒绝。
+- **统一使用 `config_schema`**：插件用 `settings`、`credentials`（Retriever 额外允许 `index_config`）分区表达配置，字段用 `type`、`title`、`description`、`default`、`enum`、`secret` 描述。`secret` 标记只允许出现在 `credentials` 分区，否则装载校验会拒绝。
 
 ## 6. 校验与验证
 
-SDK 提供 conformance 测试入口 `RunParserConformance`，做协议级**冒烟自检**，当前只覆盖三项：
+SDK 提供 conformance 测试入口 `RunParserConformance`，做协议级**冒烟自检**，覆盖三项：
 
 - 握手回报 `extension_type=parser`、`protocol_version=v1`；
 - 健康检查返回非空 `state`；
@@ -229,7 +235,7 @@ func TestParseReturnsMarkdown(t *testing.T) {
 
 ## 7. 宿主侧如何被使用
 
-加载后，宿主会把 Parser 插件注册到现有的文档解析引擎目录，所以 `docparser.NewReader(...)` 和 `docparser.ListAllEngines(...)` 会把它当成一个正常引擎看待，无需在宿主的解析链路里按插件 ID 增加分支。
+加载后，宿主会把 Parser 插件注册为一个普通的文档解析引擎，解析链路无需按插件 ID 增加分支。
 
 ## 8. 与宿主的关系（边界）
 

@@ -17,11 +17,17 @@ Web Search 插件与其他四类一样，遵循同一套发现与生命周期协
 
 | 项 | Web Search 插件取值 |
 |---|---|
-| `api_version` | `weknora.plugin/v1` |
-| `extension_type` | `search` |
-| `protocol_version` | `v1` |
+| `api_version` | `weknora.plugin/v1`（必填） |
+| `id` | 必填，插件唯一 ID |
+| `name` | 必填，插件显示名称 |
+| `version` | 必填，插件版本 |
+| `extension_type` | `search`（必填） |
+| `protocol_version` | `v1`（必填） |
+| `weknora_version` | 可选，宿主兼容范围 |
 | `entrypoint` | 必填 |
 | 环境变量 | `WEKNORA_PLUGIN_ADDR` |
+
+> 完整字段说明（含 `capabilities`、`config_schema`、`permissions`、`metadata`）见 [数据源插件指南第 1 节](plugin-development-datasource.md#1-插件包结构)。
 
 启动后必须实现两个统一服务：
 
@@ -133,6 +139,7 @@ capabilities:
 
 metadata:
   provider_type: mysearch           # 供宿主注册与路由的 provider 类型名
+  description: My Search Provider   # 可选：provider 描述，前端展示
   icon: logo.png                    # 可选：插件图标（相对插件目录的文件名，或 http(s) URL）
   docs_url: https://example.com     # 可选：官方文档链接，前端渲染"查看文档"入口
 
@@ -168,7 +175,7 @@ config_schema:
 
 permissions:
   network: allowlist                # 联网插件必须声明网络策略
-  allowed_destinations:             # 白名单：只写域名，支持通配，不带 https:// 前缀
+  allowed_destinations:             # 白名单：写域名（可带 :端口），支持通配，不带 https:// 前缀
     - "api.example.com"
     - "*.example.com"
 ```
@@ -241,9 +248,9 @@ Web Search 插件需要出站联网，所以 `permissions.network` 必须是 `al
 
 - `allowlist`：白名单模式，**必须同时提供 `allowed_destinations`**（宿主装载时校验：`allowlist` 且无白名单会直接装载失败）。
 
-白名单匹配按**域名（host）+ 通配**，不是字符串前缀匹配——写 `api.example.com` 不会误放行 `api.example.com.evil.com`。
+白名单匹配按**域名（host）+ 通配**，不是字符串前缀匹配——写 `api.example.com` 不会误放行 `api.example.com.evil.com`。合法写法是「精确域名」（`api.example.com`）、「域名:端口」（`api.example.com:443`）或「`*.example.com`」（匹配该域下的子域）；**不支持单独写 `*` 来放行全部**。
 
-**反 SSRF 边界（重要）**：出站守卫会拦截内网/私有地址（`IsForbiddenIP` 含 `IsPrivate()`）——即使 `allowed_destinations` 显式写入了内网 host，连接仍会被拒绝。因此**对接内网搜索服务的插件目前无法出站**，需先在宿主侧调整网络守卫。此外，请求里的 `BaseURL` 覆盖目标同样受 allowlist 约束：指向白名单外的域名会被拦截。
+**反 SSRF 边界（重要）**：出站守卫会拦截内网/私有地址（`IsForbiddenIP` 含 `IsPrivate()`）——即使 `allowed_destinations` 显式写入了内网 host，连接仍会被拒绝。因此**对接内网搜索服务的插件无法出站**，请改用公网搜索 API。此外，请求里的 `BaseURL` 覆盖目标同样受 allowlist 约束：指向白名单外的域名会被拦截。
 
 ## 6. 校验与验证
 
@@ -261,7 +268,7 @@ SDK 提供 conformance 测试入口 `RunWebSearchConformance`，可对插件做�
 
 Web Search 与数据源、Parser 的区别是：它不是一次性同步，而是一个按租户配置即时调用的 `ProviderFactory`。外部插件进程可长期运行，宿主每次从租户配置创建一个轻量代理，把该租户的参数随请求传入插件。
 
-加载后，宿主会把 Web Search 插件注册到现有 `web_search.Registry`，因此既有的 `WebSearchService.resolveProvider`、租户参数传递、结果过滤和后续 RAG 压缩流程无需按插件 ID 增加分支。API Key 不会写入插件进程全局状态，而是由宿主创建 provider 实例时按租户传给每次 Search 请求。
+加载后，宿主会把 Web Search 插件注册为一个普通的搜索 provider，既有的 provider 解析、租户参数传递、结果过滤与后续 RAG 压缩流程无需按插件 ID 增加分支。API Key 不会写入插件进程全局状态，而是由宿主创建 provider 实例时按租户传给每次 Search 请求。
 
 ## 8. 与宿主的关系（边界）
 

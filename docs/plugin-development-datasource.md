@@ -27,8 +27,8 @@ my-plugin/
 | `weknora_version` | 可选，宿主兼容范围，例如 `>=0.7 <1.0` |
 | `entrypoint` | **必填**。进程方式填可执行文件路径（相对 `plugin.yaml` 所在目录），或 `docker://镜像:标签` 走容器运行 |
 | `capabilities` | 可选，声明插件提供的能力。常用取值：`incremental`（增量同步）、`deletion_sync`（同步删除）、`streaming`（流式同步，见下节） |
-| `config_schema` | 可选，用户配置项、类型、是否必填/敏感（敏感字段用 `secret: true` 标记）。字段类型支持 `string` / `string[]` / `boolean` / `integer` / `number` / `directory` / `path` / `url`（`url` 会自动做 SSRF 校验） |
-| `permissions.network` | `none` 或 `allowlist`（已取消 `egress`） |
+| `config_schema` | 可选，用户配置项、类型、是否必填/敏感（敏感字段用 `secret: true` 标记）。字段类型支持 `string` / `string[]` / `array` / `boolean` / `integer` / `number` / `object` / `directory` / `path` / `url`（`url` 会自动做 SSRF 校验） |
+| `permissions.network` | `none`（默认断网）或 `allowlist`（按白名单放行） |
 | `permissions.read_paths` | 允许读取的路径声明，作为宿主审核和运行策略的输入；实际隔离仍取决于所使用的 Runtime |
 | `permissions.allowed_destinations` | 当 `network` 为 `allowlist` 时使用的域名白名单 |
 | `permissions.data` | 声明可处理的租户、知识库和数据源范围；`self` 表示当前调用上下文 |
@@ -36,6 +36,8 @@ my-plugin/
 | `metadata.icon` | 可选，连接器图标。支持两种写法：相对文件名（如 `icon.png`，指向插件目录内的文件，由宿主代理读取）或绝对 `http(s)://` URL（直接透传给前端） |
 | `metadata.description` | 可选，连接器描述，显示在类型选择卡片上 |
 | `metadata.docs_url` | 可选，插件配置文档地址。宿主透传给前端，编辑数据源时显示“配置文档”入口 |
+| `metadata.auth_type` | 可选，认证方式标识（如 `none` / `oauth2` / `api_key` / `token`），供前端展示；缺省为 `none` |
+| `metadata.priority` | 可选，整数。连接器在类型列表中的展示优先级，数值越小越靠前 |
 
 ### 关于 `capabilities` 与流式同步
 
@@ -122,7 +124,7 @@ my-plugin/
 
 ## 1.1 gRPC 协议与配置契约
 
-插件运行时通信使用 `pkg/pluginapi/proto/plugin.proto` 定义的 Protobuf。协议方法名是强约束（`Validate` / `ListResources` / `FetchAll` / `FetchIncremental` / `Parse` / `Search`），但**请求体里的部分字段仍使用 `google.protobuf.Struct` 弱信封**——这是 v1 为换取「跨语言 + 无生成代码耦合」做的取舍，字段名与类型要到运行期才校验。
+插件运行时通信使用 `pkg/pluginapi/proto/plugin.proto` 定义的 Protobuf。协议方法名是强约束（`Validate` / `ListResources` / `FetchAll` / `FetchIncremental` / `Parse` / `Search`），但**请求体里的部分字段通过 `google.protobuf.Struct` 传递**——字段名与类型在运行期校验。使用 SDK 时无需关心这一层。
 
 - 数据源使用 `DataSourceRequest` / `DataSourceResponse`；
 - 解析器使用 `ParserRequest` / `ParserResponse`；
@@ -136,7 +138,7 @@ my-plugin/
 
 ### 1.1.1 配置字段的 `url` 类型与 SSRF 校验
 
-配置字段声明为 `type: url` 时，宿主会在配置进入插件**之前**自动做 SSRF 安全校验（复用主仓内置连接器同一套 `ValidateConnectorBaseURL` 防护）：
+配置字段声明为 `type: url` 时，宿主会在配置进入插件**之前**自动做 SSRF 安全校验（与内置连接器使用同一套 URL 防护）：
 
 ```yaml
 config_schema:
@@ -166,10 +168,9 @@ JSON 对象，例如 `{"weknora.dingtalk":"trusted","third.party":"isolated"}`�
 也可以使用 `WEKNORA_PLUGIN_TRUST_LEVELS` 作为数据库未配置时的部署级回退。插件的
 Manifest 权限始终是上限，可信度配置不能扩大其允许访问的目标。
 
-**可信度变更不会立即生效**：`SetTrust` 只更新内存中的目标可信度，插件仍以它
-被加载时的可信度运行，直到下一次「刷新插件」（rescan，重新装载）或宿主重启
-才会重新解析并应用。因此修改可信度后必须触发 rescan；前端插件管理页会用
-「待生效」圆点提示存在尚未应用的变更。
+**可信度变更不会立即生效**：插件在加载时确定其可信度，修改后需要下一次
+「刷新插件」（rescan，重新装载）或宿主重启才会重新解析并应用。因此修改可信度后
+需要触发 rescan；前端插件管理页会用「待生效」圆点提示尚未应用的变更。
 
 模板仓库里的 `go.mod` 可能包含 `replace github.com/Tencent/WeKnora => ../..`，
 这只是当前源码树内联调的便利配置。复制到真正独立仓库后，应删除该
@@ -318,7 +319,7 @@ OnFetchAllStream: func(ctx context.Context, req pluginapi.Request, emit func(plu
 | `Ancestors` | `[]string` | 祖先 ExternalID 列表（`ResolveResourceAncestors` 返回） |
 | `Items` | `[]FetchedItem` | 拉取的文档条目 |
 | `Cursor` | `map[string]any` | 本次同步后的新游标 |
-| `Warnings` | `[]string` | 非致命告警 |
+| `Warnings` | `[]string` | 预留的告警字段。宿主当前不消费，不要用它上报部分失败（见 3.6） |
 
 ### 3.3 `Resource` 字段
 
@@ -356,9 +357,9 @@ OnFetchAllStream: func(ctx context.Context, req pluginapi.Request, emit func(plu
 
 文件型插件可以使用内容 SHA-256；远端 API 插件可以使用版本号、更新时间和分页 token。cursor 存在 WeKnora 数据库的数据源记录中，不属于插件进程，因此进程重启、容器替换后仍然可以继续增量同步。
 
-### 3.6 增量拉取的返回形状（宿主如何处理）
+### 3.6 增量拉取的返回形状
 
-`FetchIncremental` / `OnFetchIncremental` 一次调用返回 `items + cursor + 错误`。当前宿主按下列语义处理，插件作者务必对齐：
+`FetchIncremental` / `OnFetchIncremental` 一次调用返回 `items + cursor + 错误`。宿主按下表处理，插件作者务必对齐：
 
 | 返回形状 | 插件侧表达 | 宿主行为 |
 |---|---|---|
@@ -367,16 +368,16 @@ OnFetchAllStream: func(ctx context.Context, req pluginapi.Request, emit func(plu
 
 要点：
 
-1. **致命失败时绝不能依赖 cursor 被持久化**：宿主不会保存本次返回的 cursor，也不会处理 items。即使插件“顺便”返回了 cursor 和部分 items，它们也会被丢弃——避免把未处理的文档推进到 cursor 之后造成永久漏同步。
-2. **“部分成功”（部分资源成功、部分失败）当前尚未贯通**：v1 unary 协议目前只区分「成功 / 致命失败」两态，`Response.Warnings` 字段已在 protobuf 预留但宿主尚未消费。插件若要表达“部分成功”，当前应把整体视为致命失败返回错误（宁可整体重试，也不静默漏数据）。`Warnings` 的完整支持留待后续版本。
+1. **致命失败时不要指望 cursor 被保存**：此时宿主不处理 items、也不保存 cursor；即使插件“顺便”返回了 cursor 和部分 items，也会被一并丢弃。这是为了避免把未处理的文档推进到 cursor 之后、造成永久漏同步。
+2. **协议只区分「成功 / 致命失败」两态**：v1 unary 协议没有独立的“部分成功”返回。插件若要表达“部分资源成功、部分失败”，应把整体作为致命失败返回错误（宁可整体重试，也不静默漏数据）。`Response.Warnings` 字段当前不会被宿主消费，不能依赖它上报部分失败。
 
 ### 3.7 一致性边界（插件作者须知）
 
-增量同步当前采用 **at-least-once** 语义：当某个条目处理失败时，宿主**不推进 cursor**，下一轮会重新拉取同一批变更（包括已经成功的条目）。因此：
+增量同步采用 **at-least-once** 语义：当某个条目处理失败时，宿主**不推进 cursor**，下一轮会重新拉取同一批变更（包括本批已经成功的条目）。因此：
 
-1. **条目处理必须幂等**：同一个 `ExternalID` 被重复返回时，插件/宿主不得产生重复数据。宿主侧更新采用「先创建新版本、成功后删除旧版本」的 replacement 语义，同一 `ExternalID` 的重复更新最终收敛到单个最新版本；内容未变的重放会被去重识别为重复而跳过。
-2. **删除旧版本失败不会丢数据**：replacement 的删旧是 best-effort，失败时可能短暂存在新旧两个版本，但不会造成数据丢失；该场景可能造成短期重复检索，需后续全量同步或清理任务收敛（删除旧版本失败后不会在增量重试中自动收敛，这是一个已知边界）。完整的新旧版本原子切换（pending → active → 删除旧版）属于后续增强，当前切换点是“新版本成功入队”。
-3. **永久失败条目会钉住 cursor**：at-least-once 的代价是，某个文档若始终处理失败，cursor 会被它卡住、后续每轮重复拉取同一批。该失败会显式记录在 SyncLog（partial + 失败计数）中，不会静默丢失；独立的失败条目账本与补偿队列属于后续增强。
+1. **条目处理必须幂等**：同一个 `ExternalID` 被重复返回时，必须不产生重复数据。内容未变的重放会被宿主去重跳过；内容变更的更新会替换为新版本。请保证你的 `OnFetchIncremental` 与后端写入在重复调用下结果一致。
+2. **失败会重放，直到成功**：这是 at-least-once 的代价——某个文档若始终处理失败，cursor 会被它卡住，后续每轮重复拉取同一批。该失败会以“部分成功”状态（含失败计数）记录在同步日志中，不会静默丢失。
+3. **删除要显式表达**：源端删除必须用 `IsDeleted: true` 返回，不要返回空文档或直接省略。
 
 ## 4. 构建、安装和验证
 
@@ -385,7 +386,7 @@ go mod tidy
 go build -o weknora-plugin.exe .
 ```
 
-把插件目录放进 WeKnora 的插件目录，目录中包含 `plugin.yaml` 和可执行文件。主程序发现 Manifest 后校验版本、权限、协议版本，再由 ProcessRuntime（开发态）或 DockerRuntime（安全验收/服务器）启动。
+把插件目录放进 WeKnora 的插件目录，目录中包含 `plugin.yaml` 和可执行文件。主程序发现 Manifest 后校验版本、权限、协议版本，再按 Manifest 的 `entrypoint` 以进程方式或容器方式启动。
 
 数据源插件目录示例：
 
@@ -423,23 +424,23 @@ D:\weknora-plugins\datasource\
 - 使用 ProcessRuntime 时，插件作为宿主进程的**子进程**运行，共享宿主的网络命名空间。因此它不具备操作系统级的网络隔离能力；需要联网的插件应确认运行环境允许其声明的网络策略。`DockerRuntime` 始终使用 `--network none`；若 OCI 插件声明受控联网策略，宿主会为该插件启动独立的 Unix Socket 出口代理，插件只能通过代理访问经策略允许的公网目标。
 - `go.mod` 里的 `replace github.com/Tencent/WeKnora => ../..` 这类路径在 Windows 和 WSL 间不通用；若需跨环境构建，建议改用相对路径（如 `../../../WeKnora-fork`）或发布版 SDK 依赖，避免构建环境差异导致编译失败。
 
-第三方作者可以使用 SDK 的 `pluginapi.RunDataSourceConformance` 对已经连接的 gRPC client 做握手、健康、校验、全量和增量接口的冒烟测试。该函数签名要求分别传入控制面 client（`PluginControlClient`，负责握手与健康检查）和业务 client（`DataSourcePluginClient`，负责校验/同步），两个 client 共享同一个 gRPC 连接。集成验收还应检查：首次同步能够导入预期项目，源端只变更一个项目时插件只返回该项目，删除项目时按约定返回删除标记。
+第三方作者可以使用 SDK 的 `pluginapi.RunDataSourceConformance` 对已经连接的 gRPC client 做握手、健康、校验、全量和增量接口的冒烟测试。该函数签名要求分别传入控制面 client（`PluginControlClient`，负责握手与健康检查）和业务 client（`DataSourcePluginClient`，负责校验/同步），两个 client 共享同一个 gRPC 连接。集成测试还应检查：首次同步能够导入预期项目，源端只变更一个项目时插件只返回该项目，删除项目时按约定返回删除标记。
 
 流式插件还应验证：同步过程中收到多个响应批次；每个 cursor 都能被重新传给插件；在 checkpoint 后模拟进程中断，重启后不会重复处理已经确认的项目，也不会漏掉未确认项目。
 
-如果项目提供外部进程集成测试，应让测试直接指向待验收插件目录，读取其真实 Manifest，并覆盖 `ProcessRuntime`、gRPC、连接器解析和 cursor 传递路径。测试变量和命令应以具体测试的 README 为准，不需要写入通用插件指南。
+进程级集成测试建议直接指向插件目录、读取其真实 Manifest，并覆盖进程启动、gRPC 调用、连接器解析与 cursor 传递路径。具体的测试变量与命令以你的插件仓库 README 为准。
 
-## 5. 最小独立开发盲测
+## 5. 独立开发自检
 
-盲测者只拿到本指南和一个最小插件骨架（目录结构可参考独立插件仓库中任一插件的 `plugin.yaml` + Go 入口 + 独立 `go.mod`），不得修改 WeKnora 主仓。其交付应当能够：
+一个完整的数据源插件，应当能在**不修改 WeKnora 主仓**的前提下独立完成：
 
-1. 修改 Manifest 的 ID 和配置字段；
-2. 实现所需的 Handler（至少包括校验、全量同步和增量同步）；
+1. Manifest 的 ID、名称与配置字段由插件自定义；
+2. 实现所需的 Handler（至少包括 `OnValidate`、`OnFetchAll` 和 `OnFetchIncremental`）；
 3. 独立构建并启动 gRPC 服务；
-4. 被主程序发现、握手、健康检查；
-5. 完成至少一个文件的全量和增量同步。
+4. 被主程序发现、握手、通过健康检查；
+5. 完成至少一个文件的全量同步与增量同步。
 
-如果实现者需要改 `internal/container`、`ConnectorRegistry` 或同步服务，说明插件协议仍然泄漏了主仓内部细节，应先修订 SDK/文档。
+这些环节只依赖本指南与 `pkg/pluginapi` SDK。如果你的实现必须修改 WeKnora 主仓（例如宿主内部的连接器注册表或同步流程）才能跑通，说明插件契约尚未覆盖该场景——这属于宿主/SDK 需要补的能力，请反馈，而不是在你的插件里绕开。
 
 ## 5.1 运行期健康巡检
 

@@ -1,102 +1,141 @@
 # WeKnora 插件框架（课题一）
 
-> 本文档聚焦 WeKnora 的**统一插件控制面 + 五大扩展点插件化**。它不是项目总览（README），而是"插件框架"这一课题的交付说明：架构、插件从落盘到运行的完整生命周期、治理能力、五个扩展点的制作文档入口。
+> 本文档聚焦 WeKnora 的**统一插件控制面 + 五大扩展点插件化**。它不是 WeKnora 项目总览，而是"插件框架"这一课题的交付说明：架构、插件从落盘到运行的完整生命周期、治理能力、五个扩展点的制作文档入口。
+
+## 实测验证
+
+本课题已在 **Docker 部署**（生产态 OCI 沙箱运行时）与**快速开发模式**（开发态进程级运行时）两种运行方式下，完成了五类扩展点插件的端到端实测：
+
+- **数据源（DataSource）**：以插件方式上传 GitHub、钉钉（DingTalk）等来源的文件，验证了增量同步与 Wiki 模式；
+- **解析器（Parser）与检索器（Retriever）**：分别采用插件化的 BuiltinB 与 Milvux，完成文档解析与向量检索；
+- **网络搜索（Web Search）**：配置 Tavily 实现联网搜索；
+- **模型（Model）**：接入 DeepSeek 的深度思考能力提供问答。
+
+以上五类插件的完整实现位于独立仓库 [WeKnora-plugin](https://github.com/wei-yan1/WeKnora-plugin)，以独立仓库方式开发、无需改动主仓代码即可装载——这正是「扩展点插件化」的落地形态。
+
+五类扩展点均已端到端跑通，实测证据见第二节「验收达成与关键难题解法」与第九节运行截图，实机测试过程见文末「实机测试演示视频」。
+
+---
+
+## 验收达成与关键难题解法
+
+课题一设定了 4 条验收标准。下面先给出「验收标准 → 实现机制 → 实测证据」的逐条对照，再集中说明实现过程中攻克的关键难题及其解法。
+
+### 验收标准逐条对照
+
+| # | 验收标准 | 实现机制 | 实测证据 | 详见 |
+|---|---|---|---|---|
+| 1 | 主仓之外的独立仓库插件，免改主仓代码即可装载，并完成一次完整数据同步 | 五类扩展点统一为「Manifest 声明 + 进程外 gRPC」；插件由五个 `WEKNORA_PLUGIN_DIR_*` 目录驱动发现，经 `ExtensionAdapterRegistry` 动态接线，业务侧既有注册表以 factory 模式挂入，**业务路径一行未改** | GitHub、钉钉、LocalDir 三个数据源插件以独立仓库 [WeKnora-plugin](https://github.com/wei-yan1/WeKnora-plugin) 维护，主仓零改动完成完整同步 | 第二、三、四节 |
+| 2 | 插件声明不联网时，运行期实际无法出站，尝试联网被拦截并记录 | 默认拒绝（默认 `offline`，需管理员显式授权）+ 信任只能收窄 manifest → 容器 `--network none` 无网卡 → 唯一出口是只读挂载的 egress 代理，在网络层校验白名单并审计；即便绕过 SDK 也在网络层兜底 | 见第五节网络策略设计与文末实机录像 | 第二、五、八节 |
+| 3 | 增量同步正确：源端仅变更一个文件时，只有该文件被重新处理 | cursor 契约（插件解释语义、宿主原样存取）+ Outbox 模式（先落库再投递）+ 双层分布式锁（防重复触发、防并发拉取） | GitHub、钉钉均验证「仅变更一个文件 → 只有该文件被重新处理」 | 第二、五节 |
+| 4 | 他人仅依据文档即可独立实现一个可运行的最简插件 | 五份独立完整文档（每扩展点一份）+ 协议级 conformance 自检入口 + 可复制模板目录 | 独立仓库五类插件均依据对应文档实现，作者无需阅读主仓源码 | 第六、七节 |
+
+### 关键难题与解法
+
+#### 难题一：五类扩展点注册机制各异、全部编译期注册，如何既统一又不改动业务代码？
+
+**技术路线取舍**：在「编译期统一元数据」与「进程间 gRPC」两条路线中选择了后者。
+
+- 编译期方案（Go 原生插件或注册表合并）要求插件与主仓**同版本编译、同进程运行**，既无法满足「独立仓库、免改主仓」，也无法提供安全隔离；
+- 进程间 gRPC 让插件成为**独立进程或容器**：独立编译、独立发布，只要实现协议即可用任意语言编写，并可叠加隔离与资源边界；
+- 代价是协议与生命周期的复杂度上升。为此把复杂度**全部收敛进框架**，抽象为四层：PluginManager（控制面）→ Runtime（运行形态）→ Adapter / gRPC Proxy（适配）→ Type-specific Registry（业务）。**新增第六类扩展点只需一个 Adapter + 一份 SDK 入口 + 一份文档**，五类业务路径保持不变。
+
+#### 难题二：业务容器不能持有 docker.sock，如何安全地启动插件容器？
+
+矛盾在于：插件要跑进容器就需要有人调用 Docker，但把 `/var/run/docker.sock` 挂给业务容器，等于交出宿主机 root 权限。
+
+**解法：分权 + 窄接口 + 不信任上游参数。**
+
+- 引入独立 `plugin-runtime-agent` 容器，**唯一持有** docker.sock；app 容器既不挂载 docker.sock、也不安装 docker CLI，只通过共享卷上的 Unix socket 调用 agent 的窄接口（start / stop / health）；
+- agent **不信任 app 传来的参数**：收到请求后重新校验 plugin_id、协议版本、网络策略、资源限制，并以部署者配置的 `plugin_id → image@sha256` 白名单强制镜像来源（digest 防 tag 漂移、白名单防任意镜像）；认证 token 为空直接拒绝启动（fail-closed），比较采用常量时间算法；
+- 跨容器 socket 通过**共享运行组**（GID 2000 + setgid 目录 + `0660`）完成属主交接，解决 `--cap-drop ALL` 后插件容器无法 chown 的问题，实现最小权限下的 socket 共享。
+
+#### 难题三：插件崩溃、宿主或 agent 重启后，如何做到不残留、不串线？
+
+- **generation fencing**：每次成功启动后 generation 递增，调用租约固定 generation，插件重启后旧连接引用自动失效——杜绝回调打到已死进程；
+- **确定性容器名 + 双 label**：容器名保留 `.` / `_` 原字符，避免 `a.b` 与 `a_b` 碰撞；label 记录「agent 实例 ID + 插件 ID」，agent 重启时只清理自身创建的孤儿容器，不误伤其他部署；
+- **热重扫自愈**：`POST /api/v1/plugins/rescan` 既是热增删改入口，也是自愈通道——外部误删的插件容器可在下一次刷新时被重新拉起，且单个插件失败不影响其他插件。
+
+#### 难题四：跨进程增量同步，cursor 的语义由谁负责？
+
+若宿主试图理解每种数据源的 cursor 结构，就必须为每种源内置 diff 逻辑，框架将失去通用性。
+
+**解法：职责分离的 cursor 契约。** 插件理解语义（GitHub 是 commit SHA、钉钉是节点时间戳），宿主**只做原样保存与回传，从不解析**；删除以 `IsDeleted: true` 表达，更新按 `external_id` 决定 create / update。宿主因此对任意数据源通用，插件保留最大自由度；cursor 持久化在 `data_sources.last_sync_cursor`，插件进程重启不影响续传。
+
+#### 难题五：如何让「不联网声明」成为运行期硬约束，而不是一句口号？
+
+**解法：默认拒绝 + 声明与授权分离 + 运行期硬隔离 + 全程审计。**
+
+1. **默认拒绝（default-deny）**：插件首次装载一律以 `offline`（强制不联网）启动，宿主不预置任何信任；必须由管理员在控制面**显式修改**信任级别，插件才可能获得联网能力。信任配置非法时，全部外部插件退回 `offline`（fail-closed）——安全默认值由后台先行设定，不依赖插件自觉；
+2. **声明与授权分离**：插件在 Manifest 中标注的 `permissions.network` 只是其**声明的上限**，实际权限由管理员授予的信任级别决定；且**信任只能收窄、不能放宽**——`trusted` 声明 OCI 入口、`isolated` 非 OCI 入口，一律拒绝装载；
+3. **运行期硬隔离**：容器以 `--network none` 启动，插件**没有网卡**，`net.Dial` 在操作系统层即失败；唯一出口是 per-plugin egress 代理 socket，**只读挂载**（能 connect、不能替换），代理在网络层再次校验：`none` 直接拒绝，`allowlist` 仅放行白名单域名（支持通配），并先 DNS 解析、再按解析出的 IP 拨号，**防 DNS rebinding TOCTOU**；
+4. **隔离等级与部署形态绑定**：`isolated` 依赖 OCI 容器硬隔离，仅在 **Docker 部署**下可用；快速开发模式采用进程级运行，最高只能提供 `trusted` 级别的协作式软约束（依赖 SDK 的 `GuardedHTTPClient`）——这也是 `trusted` 仅适用于受信任插件的原因。
+
+每一次放行与拦截都写审计（插件 ID + 目的地址 + 结果）；信任级别由管理员在统一控制面集中配置，插件与调用方都无法自行提升——多租户环境下，网络权限边界始终掌握在管理员手中。
 
 ---
 
 ## 一、整体架构
 
-**通俗地说**：WeKnora 的五类扩展能力（数据源、文档解析、网络搜索、模型、检索引擎）原本硬编码在主仓里——想加一个新数据源，必须改主仓代码、提 PR、等合入。插件框架把这件事倒过来：**宿主只认一份 `plugin.yaml` 清单和一个 gRPC 协议**，任何独立仓库编译出的插件，放进指定目录就能被发现、启动、监管、调用——主仓零改动。
-
-### 分层架构
+WeKnora 的插件框架分为四层，自上而下：
 
 ```text
-┌──────────────────────── 宿主控制面（internal/plugin）────────────────────────┐
-│                                                                             │
-│  Discovery          discovery.go     扫描插件目录，递归发现 plugin.yaml       │
-│  Manager            runtime.go       生命周期注册表：状态机 + 代数(generation) │
-│      │                               + admission 并发租约 + 健康监督循环      │
-│  ExecutionPlan      runtime_plan.go  信任级别 × entrypoint → 隔离方式 + 网络  │
-│  ExtensionAdapter   adapter.go       五类扩展点各自的注册通道（datasource /   │
-│                                      parser / search / model / retriever）  │
-│                                                                             │
-│  Runtime（统一接口：Start / Stop / Health，runtime.go:19）                    │
-│    ├─ ProcessRuntime  process_runtime.go  进程态：子进程 + loopback gRPC     │
-│    │                                    （开发 / 桌面，协作式安全）           │
-│    └─ DockerRuntime   docker_runtime.go   容器态：--network none OCI 沙箱    │
-│                                         （生产，硬隔离）                     │
-│            └─ 生产形态：plugin-runtime-agent 是唯一持有 Docker 权限的组件      │
-│               （cmd/plugin-runtime-agent + agent_server.go），app 容器        │
-│                不挂 docker.sock、不装 docker CLI                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-                    │ 五类适配器注册（adapter.Register）
-                    ▼
-┌────────────── 五类业务注册表（宿主既有代码路径，零改动）──────────────────────┐
-│  ConnectorRegistry(datasource)   ParserRegistry   WebSearch.Registry       │
-│  ModelProviderRegistry           RetrieveEngineRegistry                    │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────── WeKnora Application ────────────────────┐
+│  PluginManager                                              │
+│    ├─ ManifestLoader          发现 / 校验 / 装载 plugin.yaml  │
+│    ├─ CompatibilityValidator   weknora_version / 协议版本兼容  │
+│    ├─ PluginRegistry           按 extension_type 注册工厂   │
+│    ├─ LifecycleManager         启动 / 停止 / 守护 / 重启   │
+│    ├─ HealthManager            周期性 Health + Admission    │
+│    ├─ PermissionManager        network / read_paths / data  │
+│    └─ AuditManager             装载 / 启停 / 调用审计       │
+│                                                            │
+│  Runtime                                                    │
+│    ├─ BuiltinRuntime         内置扩展（飞书 / 语雀等）       │
+│    ├─ ProcessRuntime         进程级 gRPC 插件（开发态）     │
+│    └─ DockerRuntime          Docker/OCI 沙箱（生产态）      │
+└────────────────────────────────────────────────────────────┘
+                              │
+        ┌─────────────────────┴─────────────────────┐
+        ▼                                           ▼
+┌─────────────── 内置扩展 Adapter ──────────┐   ┌──── 外部插件 gRPC Proxy ────┐
+│  复用宿主现有连接器接口（如飞书/语雀/      │   │  gRPC proxy（带 invocation │
+│  Notion/Ima/GitLab/RSS），走"内置单例"     │   │  context、admission、     │
+│  通道，仅登记生命周期控制面               │   │  generation fencing）     │
+│                                          │   │           ▼                │
+│                                          │   │  Docker/OCI Runtime       │
+└──────────────────────────────────────────┘   └────────────────────────────┘
+                              │
+                              ▼
+┌──────────────── Type-specific Registry ────────────────┐
+│   DataSource Registry   (内置 factory + 外部 plugin factory) │
+│   Parser Registry                                         │
+│   Search Registry                                         │
+│   Model Registry                                          │
+│   Retriever Registry                                      │
+└────────────────────────────────────────────────────────┘
 ```
 
-### 插件如何被识别：一个文件夹即一个插件
+**核心思想**：宿主只负责稳定的扩展点、生命周期和最小协议；插件负责具体后端实现。内置与外部并存：内置走单例通道、外置走 factory 通道，**互不覆盖**。
 
-**通俗地说**：插件的物理形态就是一个**文件夹**——里面一个 `plugin.yaml`（声明"我是哪类插件"）加一个编译好的二进制，可选再带个图标。宿主要"识别"一个新插件，不需要改任何代码，只要把它放进对应扩展点的目录。
+四个层次各司其职：
 
-宿主识别插件的三条规则：
+| 层 | 职责 | 对应代码 |
+|---|---|---|
+| PluginManager | 发现、校验、注册、生命周期、健康、权限、审计 | `internal/plugin/{discovery,loader,runtime,admission,security}.go` |
+| Runtime | 插件的实际运行形态（内置 / 进程 / 容器） | `internal/plugin/{builtin,process_runtime,docker_runtime}.go` |
+| Adapter / gRPC Proxy | 把统一生命周期接到五类业务注册表；内置走单例、外部走 factory | `internal/plugin/*_registration.go` + `datasource_proxy.go` |
+| Type-specific Registry | 宿主既有的五类注册表，插件注册进来后业务路径零改动 | `internal/datasource` 等 |
 
-1. **按扩展类型分文件夹**：五类扩展点各对应一个目录（完整目录结构见第三节）：
+**插件如何被识别**：一个插件就是一个文件夹——里面一份 `plugin.yaml`（用 `extension_type` 声明"我是哪类插件"）+ 一个编译好的二进制。宿主启动时按五个环境变量 `WEKNORA_PLUGIN_DIR_{datasource,parser,search,model,retriever}` 递归扫描对应目录，读到 `plugin.yaml` 即识别为一个插件并装载（目录结构见第三节）。**新增插件 = 新建文件夹 + 放 `plugin.yaml` 和二进制，无需改主仓代码。**
 
-```text
-plugins/
-├── datasource/   ← WEKNORA_PLUGIN_DIR_DATASOURCE
-├── parser/       ← WEKNORA_PLUGIN_DIR_PARSER
-├── search/       ← WEKNORA_PLUGIN_DIR_SEARCH
-├── model/        ← WEKNORA_PLUGIN_DIR_MODEL
-└── retriever/    ← WEKNORA_PLUGIN_DIR_RETRIEVER
-```
-
-2. **识别依据是文件夹里的 `plugin.yaml`**：宿主启动时递归扫描这些目录，找到 `plugin.yaml`（`plugin.yml` / `plugin.json` 亦可），读其中的 `extension_type` 字段判断它是哪类插件，再按该类协议注册、启动（详细过程见第二节"发现"阶段）。
-
-3. **目录可多个、路径可覆盖**：每个 `WEKNORA_PLUGIN_DIR_*` 支持用路径分隔符（Windows `;` / Linux `:`）或逗号分隔多个目录；容器部署时通过 `docker-compose.yml` 挂载，路径可自定义，未设置的变量直接跳过。
-
-> 一句话：**新增插件 = 新建一个文件夹 + 放进去 `plugin.yaml` 和二进制**，剩下的发现、校验、装载、启动、监管全由宿主完成。
-
-### 六个关键设计决策
-
-1. **一份 Manifest 契约**（`internal/plugin/types.go` `Manifest`）：插件的身份、版本、扩展类型、协议版本、`config_schema`、权限（`permissions.network` / `read_paths` / `data`）、`capabilities` 全部声明在 `plugin.yaml` 里，装载时统一校验（`manifest.Validate`：语义版本、ID 格式、网络策略、schema 分区、`secret` 只允许出现在 credentials 等）。
-
-2. **信任三级 × 双运行时**（`runtime_plan.go` `ResolveExecutionPlan`）：部署管理员为每个插件选择 `offline`（默认断网）/ `trusted`（可联网的进程插件）/ `isolated`（必须 `docker://` 的容器插件）。信任级别**只能收窄** manifest 声明的权限，不能扩大——`trusted` 插件声明了 OCI 入口会被直接拒绝，`isolated` 插件没有容器入口同样拒绝。
-
-3. **Docker 权限分离**（`runtime_wiring.go` `newOCIRuntime`）：容器化部署时，app 容器**不接触 docker.sock**。所有 OCI 插件的启动/停止请求通过共享卷上的 Unix socket 发给独立的 `plugin-runtime-agent`，由它执行 `docker run` 并再次校验请求（插件 ID 格式、扩展类型、协议版本、网络策略、镜像 digest 白名单——`agent_server.go` + `image_policy.go`）。开发/单进程形态下，同一套逻辑退化为进程内 docker CLI。
-
-4. **内置与外部并存**（`builtin.go` + 各 `*_registration.go`）：飞书、语雀、Notion、GitLab 等内置连接器原样保留"内置单例"通道，插件框架只给它们登记生命周期控制面（`BuiltinRuntime` 占位）；外部插件走"factory"通道。调用时 `GetForScope` 先查外部 factory、再回退内置单例——**两套实现互不覆盖**。
-
-5. **每次调用解析当前连接**（`runtime.go` `AcquireInvocation` + `datasource_proxy.go`）：宿主不缓存插件的 gRPC client。每次业务调用先通过 admission 申请一个调用租约（并发上限 + 排队 + drain 检查），固定当前 runtime 的 **generation（代数）**，再取"此刻"的连接构造代理。插件重启后 generation 递增，旧租约自动失效——**调用方无需感知插件的重启**。
-
-6. **单插件失败隔离**（`loader.go` `LoadExternalWithRegistries`）：一个损坏的外部插件只记录失败并跳过（`RegisterFailed` 保留占位，让插件管理页仍能看到并可修复后重试），**不回滚其他插件、不拖垮宿主启动**——与热重扫的隔离语义一致。
-
-### 插件作者靠什么做插件：`pkg/pluginapi` SDK + 五份制作文档
-
-**通俗地说**：插件作者不需要理解上面任何一张架构图或任何一段宿主代码。他只需要做三件事——（1）照着对应扩展点的文档写一个 `plugin.yaml`；（2）用宿主提供的 SDK（`github.com/Tencent/WeKnora/pkg/pluginapi`）填几个回调函数；（3）编译成一个独立二进制。宿主负责发现、启动、监管、联网管控和生命周期，作者只负责"这个数据源怎么拉数据 / 这个模型怎么调用"。
-
-三件套的对应关系：
-
-| 想做的插件 | `extension_type` | 照着写的文档 | SDK 入口 |
-|---|---|---|---|
-| 数据源（同步外部文档） | `datasource` | [plugin-development-datasource.md](docs/plugin-development-datasource.md) | `pluginapi.DataSourceHandler` |
-| 文档解析（字节 → 文本） | `parser` | [plugin-development-parser.md](docs/plugin-development-parser.md) | `pluginapi.ParserHandler` |
-| 网络搜索（查询 → 结果） | `search` | [plugin-development-websearch.md](docs/plugin-development-websearch.md) | `pluginapi.WebSearchHandler` |
-| 模型提供方（对话/向量/重排…） | `model` | [plugin-development-model.md](docs/plugin-development-model.md) | `pluginapi.ModelHandler` |
-| 检索引擎（向量/关键词存取） | `retriever` | [plugin-development-retriever.md](docs/plugin-development-retriever.md) | `pluginapi.RetrieverProvider` |
-
-这五份文档每一份都是**独立、完整、可盲测**的——它们自带五类扩展点共用的骨架速览（`plugin.yaml` 字段、`PluginControl` 握手/健康、`WEKNORA_PLUGIN_ADDR`、目录环境变量、权限声明），以及每类扩展点特有的协议字段表和 SDK Handler 示例。文档末尾还各有一个 **conformance 自检入口**（如 `RunDataSourceConformance`），作者本地就能做协议级冒烟验证，不需要起一个完整宿主。
-
-> 验收闭环：课题验收要求"他人仅依据文档即可独立实现一个可运行的最简插件"。第四节列出的 LocalDir / GitHub / DingTalk / TARily / DS 五个真实插件，正是由不同扩展点的文档 + SDK 独立产出的——它们的存在本身就证明了文档的可复现性。
+**插件作者如何开发**：作者不必理解上面的架构或宿主代码，只需照对应扩展点的文档写 `plugin.yaml`、用 `pkg/pluginapi` SDK 填回调、编译成独立二进制。五类扩展点的文档与 SDK 入口索引见第六节；每份文档独立、完整、可盲测，末尾各带一个 conformance 自检入口（如 `RunDataSourceConformance`），作者本地即可做协议级冒烟验证。
 
 ---
 
 ## 二、插件生命周期：从磁盘上的文件夹到运行中的服务
 
-**通俗地说**：以 GitHub 数据源插件为例——你把编译好的 `weknora-plugin-github` 二进制和 `plugin.yaml` 放进插件目录，宿主下次启动（或你在设置页点一次"刷新插件"）时，它会被发现、校验、注册，然后宿主把它作为子进程（或容器）拉起来，通过 gRPC 握手确认身份和能力，之后知识库每一次同步 GitHub 仓库，真正干活的都是那个独立进程。下面按真实代码一步步走。
+**通俗地说**：以 GitHub 数据源插件为例——将编译好的 `weknora-plugin-github` 二进制和 `plugin.yaml` 放入插件目录，宿主下次启动（或在设置页点击"刷新插件"）时，插件会被发现、校验、注册，随后宿主把它作为子进程（或容器）拉起，通过 gRPC 握手确认身份与能力；此后知识库每一次同步 GitHub 仓库，实际执行者都是该独立进程。以下按真实代码逐阶段展开。
 
 ### 阶段 0：宿主接线
 
@@ -142,7 +181,7 @@ plugins/
 
 注册失败会回滚该插件的全部局部状态（`rollbackLoad`：adapter.Unregister + manager.Unregister），保证重试从干净状态开始。其余四类扩展点（parser / search / model / retriever）各自有对应的 registration 文件，套路一致：**manager 登记生命周期 + 各自业务注册表登记调用入口**。
 
-### 阶段 4：启动与握手——确认"你是谁、你会什么"
+### 阶段 4：启动与握手——确认插件身份与能力
 
 `manager.Start(ctx, id)`（`runtime.go`）在 per-plugin 生命周期锁内执行：
 
@@ -231,17 +270,21 @@ D:\weknora-plugins\          ← 总目录（名称任意）
 
 ## 四、真实可用的插件示例（独立插件仓库）
 
-插件示例与模板**不放在主仓源码中**，以独立插件仓库形式维护（本机 `D:\weknora-plugins`，后续将发布为独立 GitHub 仓库）。开发者在不修改主仓任何代码的前提下，复制对应目录、改 `plugin.yaml` 的 `id` 和 `config_schema`，就能独立构建出一个新插件。
+插件示例与模板**不放在主仓源码中**，以独立插件仓库 [WeKnora-plugin](https://github.com/wei-yan1/WeKnora-plugin) 形式维护。开发者在不修改主仓任何代码的前提下，复制对应目录、改 `plugin.yaml` 的 `id` 和 `config_schema`，就能独立构建出一个新插件。
 
 | 插件 | 扩展点 | 用途 | 仓库内路径 |
 |---|---|---|---|
 | **LocalDir** | `datasource` | 从本地目录扫描文件接入知识库；用于论文、笔记、文档等本地内容 | `datasource/weknora-plugin-localdir/` |
 | **GitHub** | `datasource` | 同步 GitHub 仓库的 README / Markdown 文件到知识库 | `datasource/weknora-plugin-github/` |
 | **DingTalk** | `datasource` | 同步钉钉文档到知识库 | `datasource/weknora-plugin-dingtalk/` |
+| **BuiltinB** | `parser` | 独立文档解析插件（Markdown / TXT / CSV / JSON），验证外部解析引擎的装载与解析链路 | `parser/weknora-plugin-builtinb/` |
 | **TARily** | `search` | Tavily Search API 的别名版搜索插件 | `search/weknora-plugin-tarily/` |
 | **DS (DeepSeek)** | `model` | DeepSeek 聊天模型提供方（OpenAI 兼容） | `model/weknora-plugin-DS/` |
+| **Milvux** | `retriever` | Milvus 兼容的向量检索引擎（别名 Milvux，避免与内置 Milvus 引擎类型冲突） | `retriever/weknora-plugin-milvux/` |
 
 它们都验证了同一件事：**一个独立于 WeKnora 主仓的外部插件，能通过 Manifest 描述身份 / 能力 / 版本 / 配置 / 权限，由宿主发现、启动、管理，并通过进程外 gRPC 接入现有流程，且主仓零改动**。
+
+插件仓库按 `datasource/ parser/ search/ model/ retriever/` 五个扩展点子目录组织，每个插件包含完整的 `plugin.yaml` + Go 入口 + 独立 `go.mod`（用 `replace` 指向本地 WeKnora 源码以便联调；独立发布时删除该 replace）。
 
 ---
 
@@ -294,19 +337,420 @@ D:\weknora-plugins\          ← 总目录（名称任意）
 
 ---
 
-## 七、插件示例不在主仓源码中
+## 七、已知边界
 
-主仓不携带任何插件模板或示例插件。全部插件（含后续新增的模板）以独立插件仓库形式维护，按 `datasource/ parser/ search/ model/ retriever/` 五个扩展点子目录组织，每个插件包含完整的 `plugin.yaml` + Go 入口 + 独立 `go.mod`（用 `replace` 指向本地 WeKnora 源码以便联调；独立发布时删除该 replace）。
+- **检索引擎的高级能力**：`copy_indices` 等能力目前为可选 capability，尚未提升为必选；
+- **部分扩展点的 UI 与流式能力**：模型管理的"plugin source"选项、检索引擎的 schema / credential 配置界面尚未接入前端；解析的流式化尚未实现；
+- **隔离等级**：操作系统级硬隔离仅由 Docker/OCI 容器提供；进程形态（含快速开发模式）最高只能提供协作式软约束；
+- **生产部署待验证项**：非 root 运行的插件容器访问 egress socket 的兼容性、以及插件容器 UID/GID 的 manifest 声明，尚未纳入验证范围。
 
 ---
 
-## 八、当前实现的边界（仍待后续课题处理）
+## 八、架构流程详解：四层如何自上而下协作
 
-- 五类扩展点中，**数据源已有端到端验证**（飞书 / 语雀 / Notion / RSS / IMA / GitLab / LocalDir / GitHub / 钉钉）；其余四类的协议和适配层已就位，UI 接入完整度不同；
-- 检索引擎已落地最小协议（`Describe`/`OpenStore`/`CloseStore`/`BatchPut`/`Search`/`Delete`/`Patch` + `store_handle` 会话），自愈式 `GRPCRetrieverRepository` 已接入内部 `RetrieveEngineRepository`，`copy_indices` 等高级能力暂为可选 capability；
-- 模型管理的前端"plugin source"选项、检索引擎的前端 schema/credential 配置界面、解析的流式化、WebSearch 的统一 settings/credentials，仍是后续课题需要补齐的 P1 项；
-- Docker 沙箱是硬隔离的唯一边界；ProcessRuntime 仅供开发，`trusted` 进程插件的联网约束依赖 SDK 层 `GuardedHTTPClient` 的协作式软约束；
-- 非 root 运行的插件容器访问 egress socket 的兼容性、以及插件容器 UID/GID 的 manifest 声明，仍属后续生产部署验证项。
+本节按四层架构自上而下逐层展开，每层说明对应的源码模块、职责与关键设计。第二节从时间线视角描述插件的生命周期，本节则按模块拆解各层的职责与实现；一个请求如何贯穿四层，在本节末尾的「一张请求的完整旅程」中串联。
+
+---
+
+### 第一层：PluginManager —— 宿主控制面（internal/plugin 包的「大脑」）
+
+#### Manager 维护的 `pluginEntry` 状态（`runtime.go:107-118`）
+
+```text
+pluginEntry
+├─ manifest       Manifest                     装载时的 manifest 快照
+├─ runtime        Runtime                      实际运行的 Process/Docker 形态
+├─ state          HealthStatus                 状态机：discovered/starting/running/draining/degraded/unhealthy/stopped/failed
+├─ generation     uint64                       每次成功 Start 后 +1，fencing 用
+├─ started        bool
+├─ healthFailures int                          连续 Health 失败计数
+├─ restartCount   int                          已自动重启次数
+├─ admission      *admissionController         单插件级并发限流器（见下文）
+├─ lifecycle      sync.Mutex                   串行化"Start/Stop/Restart"
+└─ loadedTrust    PluginTrustLevel             装载时生效的信任级别（与"已配置但未生效"区分）
+```
+
+#### 并发治理：每个插件一个 admission 控制器（`admission.go`）
+
+| 参数 | 默认值 | 含义 |
+|---|---|---|
+| `MaxConcurrent` | **4** | 同一 runtime 同时允许的调用数 |
+| `MaxQueued` | **100** | 超出并发上限后排队的请求上限 |
+| `QueueTimeout` | **30s** | 排队等位的最长等待时间 |
+| `DrainTimeout` | **30s** | Stop 时等待在途调用自然结束的超时 |
+
+`acquire()`（`admission.go:79-130`）的三态机：
+
+```text
+进入 → active < MaxConcurrent？  → 占位 active[id] = cancelCall, 返回 ctx + release
+        否 → waiting < MaxQueued？   → waiting++, 等 notify 或 QueueTimeout
+                                  → 超时：rejected++，返回 AdmissionError(plugin_queue_timeout, retryable)
+                                  → 满：rejected++，返回 AdmissionError(plugin_overloaded, retryable)
+drain 模式：直接 rejected++，返回 AdmissionError(plugin_draining)
+release：删 active[id]，cancel(nil)，signal() 唤醒下一个等待者
+```
+
+注意 `release` 用 `sync.Once`（`admission.go:99-100`）——重复释放只生效一次。**`cancelActive(cause)`** 在 `drain` 超时后强制取消所有在途调用（`admission.go:142-148`），让插件能立即 Stop。
+
+#### invocation context 注入（`invocation.go`）
+
+每次业务调用经 `acquirePluginCall`（`invocation.go:38-47`）租约后，把以下字段塞进 `pluginapi.InvocationContext` 注入 gRPC metadata：
+
+| 字段 | 来源 | 用途 |
+|---|---|---|
+| `TenantID` | `datasource.ConnectorScope` 或 `ctx.Value(TenantIDContextKey)` | 插件侧做租户隔离 |
+| `KnowledgeBaseID` | scope | KB 隔离 |
+| `DataSourceID` | scope | 数据源隔离 |
+| `OperationID` | request ID 或 `uuid.NewString()` | 幂等去重、链路追踪 |
+| `TraceID` | OTel `SpanContext.TraceID()` | 链路追踪 |
+
+`acquirePluginCall` 返回的 `generation`（`runtime.go` 增）固定本次租约——插件进程内 `provider.Conn()` 返回的连接就锁在这个 generation 上；进程重启 generation 递增，旧租约的 `conn` 引用自动失效（**fencing**，防止回调到已死进程）。
+
+#### 适配层：discovery、validation、registration
+
+- `discovery.go` `DiscoverPackages`：`filepath.WalkDir` 扫五个 `WEKNORA_PLUGIN_DIR_*` 目录，收集 `plugin.yaml` / `.yml` / `.json`；
+- `manifest.go` `Validate`：语义版本（`semverPattern`）、ID 格式（小写字母数字 + `.-_`）、`extension_type` ∈ 5 选 1、`weknora_version` 在宿主版本范围内、`config_schema` 按 `settings` / `credentials` / `index_config`（仅 retriever）分区、`secret: true` 只允许在 `credentials`、网络策略为 `none` / `allowlist`（`egress` 已废弃）；
+- `adapter.go` `ExtensionAdapterRegistry`：5 个 ExtensionAdapter 注册（`dataSource` / `parser` / `search` / `model` / `retriever`），每个 `Register(manager, manifest, runtime)` 把插件"接入"对应业务路径。
+
+---
+
+### 第二层：Runtime —— 插件到底"跑在哪"
+
+#### 三种 Runtime 实现同一接口（`runtime.go:19-23`）
+
+```go
+type Runtime interface {
+    Start(context.Context) error
+    Stop(context.Context)  error
+    Health(context.Context) HealthStatus
+}
+```
+
+| Runtime | 何时选 | 形态 | 安全等级 |
+|---|---|---|---|
+| `BuiltinRuntime`（`builtin.go`） | 内置扩展（飞书 / 语雀 / Notion / GitLab / RSS / IMA 等） | 进程内单例，**只登记生命周期控制面** | 由既有实现保证 |
+| `ProcessRuntime`（`process_runtime.go`） | 离线 / 信任 + 非 OCI entrypoint | 宿主子进程 + loopback gRPC | **协作式**，无 OS 级隔离 |
+| `DockerRuntime`（`docker_runtime.go` + `local_docker_controller.go`） | 信任+OCI / 强制 OCI（`isolated`） | OCI 容器 | **硬隔离** |
+
+**选择由 `runtime_plan.go` `ResolveExecutionPlan` 决定**：管理员为每个插件设的 `PluginTrustLevel`（`offline` 默认 / `trusted` / `isolated`）× `Entrypoint` 是否 `docker://` → 出 ExecutionPlan。**信任只能收窄 manifest**（`trusted` 声明 OCI 入口 → 装载失败；`isolated` 非 OCI → 装载失败）。
+
+#### ProcessRuntime 启动（`process_runtime.go:51-153`）
+
+```text
+1. 探测 127.0.0.1 空闲端口（最多 3 次重试，指数退避 100/200/400ms）
+2. exec.Command 启动子进程，注入 5 个环境变量：
+   - WEKNORA_PLUGIN_ADDR=unix://... 或 tcp://127.0.0.1:port
+   - WEKNORA_PLUGIN_ID=<manifest.id>
+   - WEKNORA_PLUGIN_PROTOCOL_VERSION=v1
+   - WEKNORA_PLUGIN_NETWORK_POLICY=none|allowlist
+   - WEKNORA_PLUGIN_NETWORK_ALLOWLIST=host1,host2,*.example.com
+3. stderr 管道 → ConsumePluginStderr 审计
+4. grpc.DialContext（10s 连接超时，50MB 消息上限，insecure）→ Handshake → validateHandshake
+5. 任一失败：关 conn + kill cmd + wait（不留半成品）
+```
+
+`Stop`（`process_runtime.go:165-198`）三段：关 conn（取消在途 RPC）→ SIGINT 给 5s grace → 仍未退出则 SIGKILL 强杀。
+
+#### DockerRuntime 启动：完整的安全机制（`docker_runtime.go` + `local_docker_controller.go` + `agent_server.go`）
+
+**生产形态下** `app` 容器**不挂 `docker.sock`**。启动请求通过 `WEKNORA_PLUGIN_RUNTIME_AGENT_SOCKET`（默认 `/var/lib/weknora/plugin-runtime/agent.sock`）发给独立的 `plugin-runtime-agent` 容器，由 agent 真正 `docker run`。
+
+**agent 侧校验链**（`agent_server.go:194-230` `validateStartRequest`）：
+
+| 字段 | 校验 |
+|---|---|
+| `PluginID` | 正则 `^[a-z0-9][a-z0-9._-]*$`（`agent_server.go:172`） |
+| `ExtensionType` | 必须在 5 选 1 内 |
+| `ProtocolVersion` | 必须 `v1` |
+| `Image` | 非空 |
+| `NetworkPolicy` | `none` 或 `allowlist`；后者必须 `AllowedDestinations` 非空 |
+
+**agent 鉴权**：收到请求后 `s.authorized(r)`（`agent_server.go:107-118`）做 `Authorization: Bearer <token>` 头与 `s.authToken` 的 `subtle.ConstantTimeCompare` 比较——**空 token 启动 agent 直接拒绝**（`Serve` 的 `fail-closed`，`agent_server.go:90-92`）。
+
+**镜像策略**（`image_policy.go`）：通过 `WEKNORA_PLUGIN_IMAGE_ALLOWLIST` 注入「plugin_id → image@digest」精确白名单（如 `weknora.dingtalk-datasource:ghcr.io/...@sha256:abc...`），agent 端 `Check` 在启动前强校验，**未声明或 digest 不匹配 → 拒绝**。`WEKNORA_PLUGIN_IMAGE_POLICY=development` 时绕过（仅限本地开发）。
+
+**agent 启动容器时的 docker run 参数**（`local_docker_controller.go:250-271`，**与图里 Docker/OCI Runtime 对应**）：
+
+```text
+docker run --rm \
+  --network none --read-only --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --pids-limit 128 --memory 512m --cpus 1 \
+  -v <control-dir>:/run/weknora:rw \
+  -v <egress-dir>:/run/weknora-egress:ro \
+  -e WEKNORA_PLUGIN_ADDR=unix:///run/weknora/plugin.sock \
+  -e WEKNORA_PLUGIN_ID=<id> \
+  -e WEKNORA_PLUGIN_PROTOCOL_VERSION=v1 \
+  -e WEKNORA_PLUGIN_NETWORK_POLICY=... \
+  -e WEKNORA_PLUGIN_NETWORK_ALLOWLIST=... \
+  <image@sha256:...>
+```
+
+逐项解读：
+
+| 参数 | 用意 |
+|---|---|
+| `--network none` | 容器**没有网卡**，任何出站请求只能经挂载进去的 egress 代理 socket |
+| `--read-only` | 根文件系统只读，写入只能到挂载的 control/egress 目录 |
+| `--cap-drop ALL` | **丢弃所有 Linux capabilities**（包括 CAP_NET_RAW、CAP_NET_ADMIN 等）——即使被攻破也降不到特权 |
+| `--security-opt no-new-privileges` | **禁止 setuid/setgid 提权** |
+| `--pids-limit 128` | 进程数封顶（fork bomb 防护） |
+| `--memory 512m` / `--cpus 1` | 资源硬上限 |
+| `-v <control-dir>:/run/weknora:rw` | control socket 挂载（gRPC server 监听） |
+| `-v <egress-dir>:/run/weknora-egress:ro` | egress 代理 socket **只读**挂载——插件能 connect 但不能替换/删除 |
+
+**socket handover**（`local_docker_controller.go:167-198`）：插件进程在容器内 `listen` control socket 时是 root:root 0755（受 `--cap-drop ALL` 限制，chown 不出来），宿主侧 `handoverControlSocket` 循环等待 socket 出现后 **chown 到 GID 2000 + chmod 0660**——共享运行组（app / agent 同属 GID 2000）的成员才能 connect。这是"双容器共享卷 + 非 root 运行"的最小依赖。
+
+#### Network egress：per-plugin 出口代理（`egress_proxy.go`）
+
+插件容器 `--network none` 下不能直连外网。宿主给每个 isolated 插件起一个 **HTTP CONNECT 代理**监听在 Unix socket 上（`<egress-dir>/egress.sock`），挂载进容器**只读**。
+
+```text
+插件进程（容器内）
+  ↓
+egress.sock（ro 挂载的 Unix socket）
+  ↓
+EgressProxy.handle / handleConnect（egress_proxy.go:114-194）
+  ├─ authorize(host, port) → NetworkGuard.authorize
+  │    ├─ NetworkPolicy=none   → 拒绝（"plugin declares no network"）
+  │    └─ allowlist 匹配      → 域名通配（*.example.com）+ DNS 解析 + SSRF 检查
+  ├─ 用解析到的 IP 拨号（不直接用域名）—— 防止 DNS rebinding TOCTOU
+  ├─ HTTP：transport.RoundTrip（TLSHandshakeTimeout=10s, ResponseHeaderTimeout=30s）
+  └─ HTTPS：handleConnect 双向 io.Copy（HTTP/1.1 200 Connection Established）
+  ↓
+每请求记录到 Audit（plugin_id + 目的 + 是否放行）
+```
+
+`NetworkGuard.authorize`（`security.go`）是双层校验：manifest 声明的 `permissions.network` + 管理员配置的 `WEKNORA_PLUGIN_NETWORK_ALLOWLIST`，**即便插件绕过 SDK 的 `GuardedHTTPClient`（改用裸 `http.Client`），egress 代理仍在网络层兜底**。
+
+**对 trusted 进程插件**（无容器）：宿主不做网络层强制，依赖 SDK 的 `GuardedHTTPClient`（`pkg/pluginapi/guarded_client.go`）做协作式校验（域名匹配 + 审计）。这是 `trusted` 级别的设计取舍：它适用于已受信任的插件；若需要网络层硬约束，应使用 `isolated`（OCI 容器）。
+
+---
+
+### 第三层：适配层 —— 五类扩展点的 Adapter 与 gRPC Proxy
+
+这一层是「统一控制面」和「五类业务」之间的适配层。五个扩展点各有独立的 `*_registration.go`，但都遵循同一套骨架：**`manager.Register` 登记生命周期 → 各自业务注册表登记调用入口 → 每次调用经 admission 取连接构造 Proxy**。下面先讲清共用的 Proxy 骨架，再逐个展开五类的特有设计。
+
+#### 共用的 Proxy 骨架（五类一致的 4 步）
+
+```text
+1. ExtensionAdapter.Register(manager, manifest, runtime)
+   ├─ manager.Register：manifest.Validate + CapabilityReporter 双向校验 + 登记 pluginEntry
+   └─ 各自 Registry 登记调用入口（见五类各自展开）
+
+2. 业务路径取连接（每次调用时）
+   ├─ Manager.AcquireInvocation → admission 限流（MaxConcurrent=4 / MaxQueued=100 / QueueTimeout=30s）
+   │                              + 固定 generation（fencing）
+   ├─ provider.Conn() 取「当前」gRPC 连接（第二层 Runtime 维护，generation 变化后自动失效）
+   └─ 构造该扩展点对应的 GRPC Proxy
+
+3. gRPC 调用 + 返回
+   ├─ 注入 invocation context（TenantID/KnowledgeBaseID/DataSourceID/OperationID/TraceID）
+   ├─ 插件侧 SDK 读 metadata、执行业务、写响应
+   └─ 宿主解码响应
+
+4. lease.Close() 释放 admission（信号量 -1，唤醒下一个等待者）
+```
+
+**关键设计**：`GetForScope` 先查外部 factory、查不到回退内置单例（`datasource/connector.go:147-156`）——外部插件能覆盖内置实现，也正因如此外部插件的 `connector_type` / `engine_type` 强制不能与内置重名（防 shadow）。streaming 能力判定（B 方案）：manifest 声明 `streaming` 才构造 `GRPCStreamingConnectorProxy` 走流式路径，否则走批量 `FetchIncremental`。
+
+#### ① 数据源（DataSource）适配：完整的同步处理流程
+
+**入口**：`DataSourceService.ManualSync`（`datasource_service.go`）或 `startDataSourceScheduler`（cron 触发）→ 构造 `DataSourceSyncPayload{DataSourceID, TenantID, SyncLogID, ForceFull, Trigger: "manual" | "scheduled"}`。
+
+**Outbox 模式**（`sync_outbox.go`）：同步意图**先落库再投递队列**，投递失败时保留 `pending` 状态由后台 dispatcher 指数退避重试——保证「至少一次、可追踪」。
+
+```text
+1. 创建 SyncLog（status=pending）落 DB
+2. syncLog.TaskID = SyncTaskID(dsID, logID) = "dssync:<dsID>:<logID>"
+3. syncLog.TaskPayload = JSON(payload)
+4. dispatcher.Dispatch → asynq.Enqueue(TaskID=log.TaskID, MaxRetry=5, Timeout=2h)
+   ├─ 成功：log.DispatchedAt 标记 + 入队
+   └─ 失败（非冲突类致命错）：MarkDispatchFailure + 指数退避（1/2/4/8…分钟，阈值后告警）+ 重试
+```
+
+**双层分布式锁**（`sync_lock.go` `SyncCoordinator`）—— 课题一的核心设计：
+
+| 锁 | key | 租约 / 续租 | 串行化边界 | 防的是 |
+|---|---|---|---|---|
+| `trigger-lock` | `weknora:datasource:{<dsID>}:trigger-lock` | **15s / 5s** | "检查 pending/running → 创建 SyncLog → Asynq 入队" | 同一数据源被**重复触发、重复入队**（cron + 手动同时点） |
+| `execution-lock` | `weknora:datasource:{<dsID>}:sync-lock` | **45s / 15s** | "connector 实际拉取执行" | 同一数据源**并发拉取**（两个 Worker 同时跑） |
+
+**关键设计**（不是简单 `SETNX`）：
+
+- **token-owned**：每次获取生成 `redislock.NewToken()`，续租与释放都校验 token，只有持有者能释放——**防误释放**（`sync_lock.go:160-174`）；
+- **key 带 hash tag `{<dsID>}`**：天然支持 Redis Cluster，所有该数据源相关键落在同一 slot；
+- **续租失败即取消**（`sync_lock.go:175-196`）：`renewLoop` 每 5s/15s 续租，失败立即 `cancel(cause)` 上下文，Worker 感知"锁已丢失"后主动停止——**防两实例同时写**；
+- **fail-closed**（`redislock.TryAcquire` 错误时直接返回）：Redis 故障时宁可不同步也不让两实例并发；
+- **本地 fallback**（`localSyncLocker`，`sync_lock.go:93-107`）：Lite 单进程无 Redis 时退化为进程内 `map + mutex`，接口与 Redis 版一致，调用方零感知。
+
+**Worker 取到任务后**：
+
+```text
+ProcessSync（datasource_service.go:1114-）
+  ├─ streamStartCursor(ds, forceFull, attempt) → cursor
+  │    ├─ forceFull && attempt==0 → nil（全量）
+  │    └─ 否则 → ds.ParseSyncCursor()（DB last_sync_cursor）
+  ├─ if connector implements StreamingConnector → processSyncStreaming
+  │    ├─ handler.Emit(item) → KnowledgeService.Ingest（边拉边入）
+  │    └─ handler.Checkpoint(cursor) → DB 持久化（断点续传）
+  └─ else → processSync（普通批量路径）
+       ├─ forceFull || SyncMode==Full → connector.FetchAll
+       └─ 否则 → connector.FetchIncremental（cursor 进出）
+            → items 批量入库 → 更新 last_sync_cursor
+```
+
+**增量同步的 cursor 契约**（**这是课题验收点 3 的核心**）：
+
+- 插件自己读 cursor（GitHub 用 commit SHA、钉钉用节点时间戳——**不规定 cursor 内部结构**）；
+- 宿主**原样保存**到 `data_sources.last_sync_cursor`（JSONB）；
+- 宿主**原样回传**给插件（`request.Cursor`），绝不解析；
+- 删除通过 `IsDeleted: true` 表达（插件在 diff 时发现 cursor 里有、这次 list 里没有 → 返回 `IsDeleted=true`）；
+- 改动通过返回普通 item 表达（带相同 `external_id` + 新内容 → 宿主用 `external_id` 决定 create/update）；
+- **一致性边界（at-least-once，失败不推进 cursor）**：致命拉取错误、或本批次存在处理失败的条目时，宿主**不前进 cursor**，下一轮重新拉取同一批（含本批已成功的条目），避免未处理的文档被 cursor 永久跳过；代价是条目处理必须幂等，宿主侧更新采用「先建新版本、成功后删旧版本」的替换语义，删除旧版本失败只残留重复、不丢数据。
+
+#### ② 文档解析（Parser）适配（`parser_registration.go`）
+
+**注册入口**：`RegisterExternalParser` → `docparser.RegisterEngine(externalParserRegistration{...})`。关键结构 `externalParserRegistration` 实现 `docparser.EngineRegistration` 接口：
+
+| 方法 | 作用 |
+|---|---|
+| `Name()` / `Description()` | 引擎名（`metadata.engine_name`，默认插件 id）+ 描述 |
+| `ConfigSchema()` | 透传 manifest 的 `config_schema`（settings/credentials），驱动 Parser 设置页 |
+| `FileTypes(bool)` | 返回 `metadata.file_types`（如 `pdf`、`docx`），**空则装载失败**——宿主靠它做文件类型路由 |
+| `CheckAvailable(bool, map[string]string)` | **读 manager.HealthSnapshot 而非主动探测**：插件进程崩溃后，health supervisor 一个周期内就会把状态翻成非 running，这里据此判定引擎不可用 |
+| `NewReader(ctx, deps)` | `provider.Conn()` 取连接 → 构造 `GRPCParserProxy`（`Client: pluginapi.NewParserPluginClient(conn)`） |
+
+**特有设计**：parser 是无状态「字节 → 文本」的一次性 RPC，但 `CheckAvailable` 不真 ping 引擎——它信任第一层 Manager 的 `HealthSnapshot`（由 Start 后握手 + 监督循环维护），因为主动探测会加重引擎负担，且无法区分「引擎进程死」和「引擎后端慢」。
+
+#### ③ 网络搜索（WebSearch）适配（`web_search_registration.go`）
+
+**注册入口**：`RegisterExternalWebSearch` → `registry.RegisterWithInfo(providerType, factory, info)`。factory 的签名是 `func(params WebSearchProviderParameters) (WebSearchProvider, error)`：
+
+```text
+每次创建 provider 实例（按租户配置）时：
+  conn := provider.Conn()                     ← 取当前连接
+  client := pluginapi.NewWebSearchPluginClient(conn)
+  return &GRPCWebSearchProxy{Client, Params, NameValue, Manager, PluginID}
+```
+
+**特有设计**：web search 是**按租户即时调用**的 `ProviderFactory`，不是一次性同步。因此「凭证」被挡在 factory 边界外——`params.APIKey` 随每次 `Search` 请求传入，**不写进插件进程的全局状态**，一个长生命周期插件进程能服务多个租户而互不串凭证。保留 key（`api_key`/`engine_id`/`base_url`/`proxy_url`）由宿主内置表单区渲染，不重复成自定义字段。
+
+#### ④ 模型（Model）适配（`model_registration.go`）
+
+**注册入口**：`RegisterExternalModel` → `modelprovider.RegisterExternalModelResolver(providerName, resolver)`。resolver 的签名：
+
+```text
+func(ctx, modelID) (ModelPluginClient, ctx, release, err)
+  lease := manager.AcquireInvocation(ctx, pluginID)    ← admission + generation
+  conn  := provider.Conn()
+  callCtx := pluginapi.WithInvocationContext(lease.Context, invocationFromContext(ctx, ""))
+  return pluginapi.NewModelPluginClient(conn), callCtx, lease.Close
+```
+
+**特有设计**（模型是五类里最复杂的一个）：
+
+- **每次调用动态解析连接**：模型插件承载有状态长连接（对话流），宿主**不缓存固定 client**，每次 Chat/Embed 都走 resolver 现取连接——插件重启后下次调用自动拿到新连接，旧连接因 generation fencing 失效；
+- **一个进程承载五种能力**：`chat` / `embedding` / `rerank` / `vllm` / `asr`，`Capabilities` 声明实现了哪些，未实现的回调留 nil（调用时返回 "not implemented"）；
+- **配置一次性投递 + 重启重推**：`base_url` / `api_key` 只在「保存模型」时经 `ValidateConfig` 传入一次，插件在进程内缓存；重启后缓存清空，宿主靠 `ModelConfigRepusher`（`runtime.go` 的 `fireModelConfigRepush`）在每次 (re)start 后异步重推；
+- **`model_ui` 声明**：`features`（thinking/streaming/vision/tools）与 `host_fields`（base_url/api_key 等公共字段的显隐策略）由插件声明，宿主透传给前端动态渲染，无需硬编码。
+
+#### ⑤ 检索引擎（Retriever）适配（`retriever_registration.go`）
+
+**注册入口**：`RegisterExternalRetriever` → `registry.put(RetrieverProviderInfo{EngineType, Capabilities, OpenSession, GenerationValid})`。与其它四类「每次调用构造 client」不同，retriever 是**有状态会话**——`OpenSession` 工厂打开一个 store 会话：
+
+```text
+OpenSession(config):
+  lease := manager.AcquireInvocation(ctx, pluginID)
+  conn  := provider.Conn()
+  client := pluginapi.NewRetrieverPluginClient(conn)
+  desc, _ := client.Describe(...)                       ← 懒加载 ScoreSemantics
+  resp  := client.OpenStore(RetrieverOpenStoreRequest{Config})
+  return client, resp.StoreHandle, lease.Generation     ← store_handle + 绑定 generation
+```
+
+**特有设计**（retriever 是唯一有状态的扩展点）：
+
+- **`store_handle` 不透明会话**：`OpenStore` 返回 SDK 生成的不透明 handle，之后所有 `BatchPut` / `Search` / `Delete` / `Patch` 都携带它——插件自己维护「一个 store = 一个后端连接/索引」；
+- **懒加载 `ScoreSemantics`**：注册时插件进程尚未启动（loader 先 Register 后 Start），所以 `Describe` 不能注册时调；宿主改在**首次 `OpenStore` 时**调 `Describe` 读分数语义（`similarity_higher_better` / `distance_lower_better` / `rank_only`）并缓存，供跨引擎归一化；
+- **引擎类型防 shadow**：`types.IsValidEngineType(engineType)` 拒绝与内置引擎（postgres/qdrant/milvus 等）重名的外部引擎，提示用别名 + 声明 `score_semantics`；
+- **`GenerationValid` 回调**：store 会话绑定的 runtime generation 变化后（插件重启），宿主据此懒重开会话——不缓存死连接；
+- **无缝接入内部仓库**：自愈式 `GRPCRetrieverRepository` 已接入宿主内部 `RetrieveEngineRepository`，外部检索引擎对上层业务流程完全透明。
+
+#### 五类适配对照小结
+
+| 扩展点 | 注册入口 | 调用形态 | 特有设计 |
+|---|---|---|---|
+| 数据源 | `ConnectorRegistry.RegisterFactory` | 一次性同步 / 流式同步 | Outbox + 双层分布式锁 + cursor 契约 + 增量/删除 |
+| 文档解析 | `docparser.RegisterEngine` | 无状态 `Parse` RPC | `FileTypes` 路由 + `HealthSnapshot` 判可用 |
+| 网络搜索 | `WebSearch.Registry.RegisterWithInfo` | 按租户即时 `Search` | 凭证挡在 factory 边界外，多租户隔离 |
+| 模型 | `modelprovider.RegisterExternalModelResolver` | 每次调用动态解析 | 五能力并存 + 配置一次性投递 + 重启重推 + model_ui |
+| 检索引擎 | `RetrieverProviderRegistry.put` | 有状态 `OpenStore` 会话 | store_handle + 懒加载 ScoreSemantics + generation 懒重开 |
+
+---
+
+### 第四层：Type-specific Registry —— 落到宿主既有业务
+
+最底层是五类业务注册表，**插件框架零改动**这些已有代码：
+
+| Registry | 文件 | 承载的扩展点 | 关键类型 |
+|---|---|---|---|
+| `ConnectorRegistry` | `internal/datasource/connector.go` | 数据源 | `Connector`（`Validate` / `ListResources` / `FetchAll` / `FetchIncremental`）+ `ConnectorFactory` |
+| `ParserRegistry` | 文档解析模块 | 文档解析 | parser Engine |
+| `WebSearch.Registry` | `internal/infrastructure/web_search` | 网络搜索 | `WebSearchProvider` |
+| `ModelProviderRegistry` | 模型模块 | 模型 | `Chat` / `Embed` / `Rerank` / `VLM` / `Transcribe` |
+| `RetrieverProviderRegistry` | `internal/plugin/retriever_registration.go` | 检索引擎 | `RetrieverProvider` + `RetrieverBackend` |
+
+注册表以下，宿主既有的同步、解析、检索、模型调用流程**完全不变**。插件框架的"统一"价值就在于：五类业务共用同一套 PluginManager + Runtime + Adapter + Proxy，新增第六类扩展点只需写一个新 Adapter + 一份 SDK 入口 + 一份制作文档。
+
+---
+
+### 一张请求的完整旅程（四层串起来）
+
+以「用户在知识库里点一次 GitHub 数据源的立即同步」为例，把四层 + 关键设计全部走一遍：
+
+```text
+① 业务层（第四层之上）
+   ManualSync → 双层分布式锁的 trigger-lock 拿到 → 创建 SyncLog 落库
+   → sync_outbox.Dispatch → asynq.Enqueue(dssync:<dsID>:<logID>)
+
+② Worker 取任务 → processSync
+   streamStartCursor(ds, forceFull=false) → ds.ParseSyncCursor()（上次的 cursor）
+   → 调 connector.FetchIncremental(ctx, config, cursor)
+
+③ connector 是外部插件 → ConnectorRegistry.GetForScope
+   ─→ factory 命中（registration.go 的 RegisterFactory 注册的）
+   ─→ acquirePluginCall：
+         Manager.AcquireInvocation（admission: MaxConcurrent=4, MaxQueued=100, QueueTimeout=30s）
+         → 拿 lease（固定 generation、注入 invocation context）
+       provider.Conn() 取当前 gRPC 连接（第二层 Runtime 维护）
+   ─→ 构造 GRPCConnectorProxy（无 streaming capability → 普通 batch proxy）
+
+④ proxy.FetchIncremental → gRPC
+   metadata 注入：TenantID, KnowledgeBaseID, DataSourceID, OperationID, TraceID
+   → 插件进程 OnFetchIncremental
+       读 request.Cursor → GitHub compare(prev, head) → 增量文件 + 新 cursor
+       （isolated 插件的出站请求经 EgressProxy 强制白名单 + 审计）
+
+⑤ 结果沿原路返回
+   proxy 解码 → items 批量入库（KnowledgeService.Ingest）
+              → 更新 data_sources.last_sync_cursor = 新 cursor
+   lease.Close() 释放 admission（信号量 -1，唤醒下一个等待者）
+
+⑥ 期间健康监督循环（每 30s 跑一次 runtime.Health）
+   3 次连续失败 → State=Unhealthy → 自动 Restart（最多 3 次）
+   Restart 流程：drainAdmission(30s) → 强 cancelActive → runtime.Stop(15s) → 重新 Start
+   成功后 generation +1，所有旧租约的 conn 引用自动失效（fencing）
+```
+
+整个路径里：
+
+- **第一层**只出现在"申请/释放租约、状态机推进、调度监督"三个点；
+- **第二层**只提供"连接"——进程态保持子进程存活、容器态保持 control socket 存活；
+- **第三层**负责"翻译与护送"——invocation context 注入、admission 限流、generation fencing、gRPC 编解码；
+- **第四层**负责"路由"——把请求分发到内置/外部对应实现。
+
+每一层**只做自己该做的事，不越界**。这就是「统一架构 → 分层管理」的具体含义——**统一**是 PluginManager 抽象出插件这一统一概念，**分层**是各层职责互不侵入，新扩展点只需插在第三/四层之间。
 
 ---
 
@@ -323,3 +767,17 @@ D:\weknora-plugins\          ← 总目录（名称任意）
 ![DingTalk 插件：增量同步成功](docs/images/datasource-dingtalk-sync.png)
 
 ![GitHub 同步进入知识库的文档列表](docs/images/knowledge-github-docs.png)
+
+---
+
+## 十、实机测试演示视频
+
+以下是五类扩展点插件在 Docker 部署与快速开发模式下的实机测试录像（共 7 段）：
+
+- `fc4e4a85_v2_p1a.mp4`
+- `fc4e4a85_v2_p1b1.mp4`
+- `fc4e4a85_v2_p1b2.mp4`
+- `fc4e4a85_v2_p1c.mp4`
+- `fc4e4a85_v2_p1d.mp4`
+- `fc4e4a85_v2_p2a.mp4`
+- `fc4e4a85_v2_p2b.mp4`

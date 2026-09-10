@@ -7,7 +7,7 @@
 
 ## 1. Model 插件是做什么的
 
-Model 插件负责把一个外部模型服务（自有模型、第三方 API 等）接入 WeKnora。与其他四类「单一 RPC」不同，Model 插件**一个进程可以同时承载多达五种能力**：
+Model 插件负责把一个外部模型服务（自有模型、第三方 API 等）接入 WeKnora。与只暴露单一业务 RPC 的 Parser / Web Search 不同，Model 插件的**一个进程可以同时承载多达五种能力**：
 
 | 能力 | capability 字符串 | 作用 |
 |---|---|---|
@@ -23,11 +23,17 @@ Model 插件负责把一个外部模型服务（自有模型、第三方 API 等
 
 | 项 | Model 插件取值 |
 |---|---|
-| `api_version` | `weknora.plugin/v1` |
-| `extension_type` | `model` |
-| `protocol_version` | `v1` |
+| `api_version` | `weknora.plugin/v1`（必填） |
+| `id` | 必填，插件唯一 ID |
+| `name` | 必填，插件显示名称 |
+| `version` | 必填，插件版本 |
+| `extension_type` | `model`（必填） |
+| `protocol_version` | `v1`（必填） |
+| `weknora_version` | 可选，宿主兼容范围 |
 | `entrypoint` | 必填 |
 | 环境变量 | `WEKNORA_PLUGIN_ADDR` |
+
+> 完整字段说明（含 `capabilities`、`config_schema`、`permissions`、`metadata`）见 [数据源插件指南第 1 节](plugin-development-datasource.md#1-插件包结构)。
 
 启动后必须实现两个统一服务：
 
@@ -214,7 +220,7 @@ permissions:
     - "api.example.com"
 ```
 
-### 运行方式与网络声明（黑盒约定）
+### 运行方式与网络声明
 
 插件通过 `entrypoint` 声明启动方式：可执行文件，或 `docker://镜像`。通过 `permissions.network` 声明网络范围：`none` 或 `allowlist` + `allowed_destinations`（模型插件通常需要出站调用模型服务，用 `allowlist`）。出站请求必须经 `pluginapi.NewPluginHTTPClient()` 发起（读取宿主注入的网络策略），不要用裸 `http.Client`，否则白名单不生效。
 
@@ -269,13 +275,13 @@ permissions:
 - `host_fields` 只对 `source=plugin` 的插件生效；内置 provider 的显隐逻辑保持不变，不受影响。
 - 插件自定义字段仍走 `config_schema.settings` → `configFields` → 前端 `SchemaFieldInput` 动态渲染，与 `host_fields` 互不重叠。
 
-**透传链路**：`Manifest.model_ui` → `ExternalModelInfo` → `ModelProviderDTO`（`features` + `hostFields`）→ 前端 `ModelProviderOption`。当前 `features` 已完成整条链路透传，编辑页的能力标识与聊天场景的「思考开关」展示留作后续前端消费。
+**透传链路**：`Manifest.model_ui` → `ExternalModelInfo` → `ModelProviderDTO`（`features` + `hostFields`）→ 前端 `ModelProviderOption`。插件只需在 manifest 的 `model_ui` 中声明，宿主会把这些元数据随 `/models/providers` 接口一并透传给前端。
 
 ## 6. 宿主如何调用模型插件（重要：调用期解析机制）
 
 模型插件与其他四类的一个关键差异是：**宿主不会缓存一个固定的 gRPC client**，而是**每次调用时动态解析**。
 
-原因是模型插件承载有状态的长连接能力，且可能被健康监控重启。宿主侧（`internal/plugin`）注册的是一个「resolver 回调」，每次模型调用时：
+原因是模型插件承载有状态的长连接能力，且可能被健康监控重启。宿主为插件注册的是一个「调用期解析回调」，每次模型调用时：
 
 1. 通过 admission control 申请一次调用租约（并发限制 + drain 检查）；
 2. 读取**当前**运行时连接（插件重启后自动拿到新连接，不会用到已关闭的旧 client）；
@@ -381,7 +387,7 @@ report := pluginapi.RunModelConformance(ctx, controlClient, modelClient)
 
 建议流程：本地起 server（`ServeModel`）→ 跑 `RunModelConformance` → 全部通过后再放入 `WEKNORA_PLUGIN_DIR_MODEL` 交给宿主装载。
 
-补充：还需额外验证**重启恢复**（kill 进程 → 重启 → 再次调用），这对应宿主侧 resolver 机制，宿主已有自动化回归测试覆盖；插件作者只需确保自己的实现无状态或能承受重启。
+补充：还需额外验证**重启恢复**（kill 进程 → 重启 → 再次调用）。插件作者只需确保自己的实现无状态或能承受重启，宿主会在插件重启后自动恢复调用。
 
 ## 8. 与宿主的关系（边界）
 
@@ -389,11 +395,11 @@ Model 插件**只负责「模型能力的实际调用」**（把请求发给模�
 
 - 模型配置的存储与管理——宿主管理；
 - 知识库检索、融合、切分——其他扩展点 / 宿主的职责；
-- 租户校验、权限、限流——宿主处理（通过 resolver 里的 admission + invocation context 注入）。
+- 租户校验、权限、限流——宿主在处理调用时统一注入。
 
 插件内部可自行管理模型服务的连接池、重试、密钥轮换等，宿主不关心。
 
-## 9. 部署注意（实战经验）
+## 9. 部署注意
 
 ### 9.1 双平台二进制
 
