@@ -12,29 +12,36 @@ import (
 // versionedSQLiteTables is the set of tables that SQLite migrations must
 // create to stay in sync with the versioned (PostgreSQL) migrations:
 // 000041 task queue, 000053 system settings, 000055 processing spans,
-// 000063 knowledge multi-tags.
+// 000063 knowledge multi-tags, 000091 mastery guide ledgers.
 var versionedSQLiteTables = []string{
 	"task_pending_ops",
 	"task_dead_letters",
 	"system_settings",
 	"knowledge_processing_spans",
 	"knowledge_tag_relations",
+	"memory_citations",
+	"memory_page_views",
+	"memory_answer_likes",
+	"memory_guide_exposures",
+	"memory_mastery_daily",
+	"memory_spread_views",
 }
 
 // versionedSQLiteColumns maps each existing table to the columns that the
 // versioned migrations add and the SQLite baseline was missing.
 var versionedSQLiteColumns = map[string][]string{
-	"tenants":            {"api_principal_config"},           // 000064
-	"users":              {"is_system_admin"},                // 000053
-	"knowledges":         {"pending_subtasks_count"},         // 000056
-	"messages":           {"attachments", "usage"},           // 000034, 000085
-	"tenant_invitations": {"token", "accepted_count"},        // 000054
-	"embed_channels":     {"allow_memory"},                   // 000060
-	"mcp_oauth_tokens":   {"principal_type", "principal_id"}, // 000064
-	"mcp_tool_approvals": {"enabled"},                        // 000091
+	"tenants":                {"api_principal_config"},           // 000064
+	"users":                  {"is_system_admin"},                // 000053
+	"knowledges":             {"pending_subtasks_count"},         // 000056
+	"messages":               {"attachments", "usage"},           // 000034, 000085
+	"tenant_invitations":     {"token", "accepted_count"},        // 000054
+	"embed_channels":         {"allow_memory"},                   // 000060
+	"mcp_oauth_tokens":       {"principal_type", "principal_id"}, // 000064
+	"mcp_tool_approvals":     {"enabled"},                        // 000091
+	"memory_guide_exposures": {"knowledge_base_id"},              // 000094 / Lite 000015
 }
 
-const expectedSQLiteMigrationVersion = 13
+const expectedSQLiteMigrationVersion = 17
 
 func TestSQLiteMigrationsCreateVersionedSchema(t *testing.T) {
 	repoRoot := sqliteRepoRoot(t)
@@ -62,6 +69,12 @@ func TestSQLiteMigrationsCreateVersionedSchema(t *testing.T) {
 			)
 		}
 	}
+
+	// 引导曝光按候选查询的索引（000095 / Lite 000016）：每次有效浏览都会按
+	// (kb, candidate_slug) 回填 qualified_view_at，缺索引会退化成扫描。
+	require.True(t,
+		sqliteIndexExists(t, db, "memory_guide_exposures", "idx_mastery_exposure_candidate"),
+		"SQLite migrations must create idx_mastery_exposure_candidate")
 
 	assertSQLiteShareLinkInvitationsWork(t, db)
 	assertSQLiteMCPOAuthPrincipalUpsertWorks(t, db)
@@ -166,6 +179,17 @@ func sqliteTableExists(t *testing.T, db *sql.DB, table string) bool {
 	require.NoError(t, db.QueryRow(
 		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
 		table,
+	).Scan(&n))
+	return n == 1
+}
+
+func sqliteIndexExists(t *testing.T, db *sql.DB, table, index string) bool {
+	t.Helper()
+	var n int
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND name = ?",
+		table,
+		index,
 	).Scan(&n))
 	return n == 1
 }

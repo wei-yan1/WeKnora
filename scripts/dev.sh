@@ -172,7 +172,7 @@ _wait_odl_hybrid_ready() {
         sleep "$interval"
         waited=$((waited + interval))
     done
-    log_warning "odl-hybrid 在 ${max_wait}s 内未就绪，请查看: docker logs WeKnora-odl-hybrid"
+    log_warning "odl-hybrid 在 ${max_wait}s 内未就绪，请查看: docker compose -f docker-compose.dev.yml logs odl-hybrid"
     return 1
 }
 
@@ -274,7 +274,7 @@ start_services() {
         echo ""
         log_info "服务访问地址:"
         echo "  - PostgreSQL:    localhost:5432"
-        echo "  - Redis:         localhost:6379"
+        echo "  - Redis:         localhost:${REDIS_PORT:-6379}"
         echo "  - DocReader:     localhost:50051"
         
         # 根据启用的 profile 显示额外服务
@@ -482,7 +482,8 @@ start_app() {
         export DB_HOST=127.0.0.1
         export DOCREADER_ADDR=127.0.0.1:50051
         export MINIO_ENDPOINT=127.0.0.1:9000
-        export REDIS_ADDR=127.0.0.1:6379
+        # 尊重 .env 中的 REDIS_PORT（本机 6379 可能被 Memurai 等占用，容器映射到其他端口）
+        export REDIS_ADDR="127.0.0.1:${REDIS_PORT:-6379}"
         export MILVUS_ADDRESS=127.0.0.1:19530
         export NEO4J_URI=bolt://127.0.0.1:7687
         export QDRANT_HOST=127.0.0.1

@@ -1,387 +1,616 @@
-<p align="center">
-  <picture>
-    <img src="./docs/images/logo.png" alt="WeKnora Logo" height="120"/>
-  </picture>
-</p>
+# 课题四 · 知识网络与引导式学习 —— 个人知识地图
 
-<p align="center">
-  <picture>
-    <a href="https://trendshift.io/repositories/15289" target="_blank">
-      <img src="https://trendshift.io/api/badge/repositories/15289" alt="Tencent/WeKnora | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/>
-    </a>
-  </picture>
-</p>
-<p align="center">
-    <a href="https://weknora.weixin.qq.com" target="_blank">
-        <img alt="Official Website" src="https://img.shields.io/badge/Official Website-WeKnora-4e6b99">
-    </a>
-    <a href="https://chatbot.weixin.qq.com" target="_blank">
-        <img alt="WeChat Dialog Open Platform" src="https://img.shields.io/badge/WeChat Dialog Open Platform-5ac725">
-    </a>
-    <a href="https://chromewebstore.google.com/detail/jpemjbopikggjlmikmclgbmkhhopjdgd" target="_blank">
-        <img alt="Chrome Extension" src="https://img.shields.io/badge/Chrome Extension-WeKnora-4285F4">
-    </a>
-    <a href="https://clawhub.ai/lyingbug/weknora" target="_blank">
-        <img alt="ClawHub Skill" src="https://img.shields.io/badge/ClawHub Skill-WeKnora-ff6b35">
-    </a>
-    <a href="https://www.npmjs.com/package/@wxg-prc-cpg/dsh-weknora" target="_blank">
-        <img alt="npm @wxg-prc-cpg/dsh-weknora" src="https://img.shields.io/npm/v/@wxg-prc-cpg/dsh-weknora?label=dsh-weknora">
-    </a>
-    <a href="https://github.com/Tencent/WeKnora/blob/main/LICENSE">
-        <img src="https://img.shields.io/badge/License-MIT-ffffff?labelColor=d4eaf7&color=2e6cc4" alt="License">
-    </a>
-    <a href="./CHANGELOG.md">
-        <img alt="Version" src="https://img.shields.io/badge/version-0.8.0-2e6cc4?labelColor=d4eaf7">
-    </a>
-</p>
+> **WeKnora 开源实战课题** · 腾讯犀牛鸟开源人才培养计划
+>
+> 本文档面向课题评审，说明本课题的**完成情况、实现路径与验证方案**。
+> 完整设计说明见仓库根目录《课题四_知识网络与引导式学习_重构方案》。
 
-<p align="center">
-| <b>English</b> | <a href="./README_CN.md"><b>简体中文</b></a> | <a href="./README_JA.md"><b>日本語</b></a> | <a href="./README_KO.md"><b>한국어</b></a> |
-</p>
+---
 
-<p align="center">
-  <h4 align="center">
+## 摘要：一页看懂
 
-  [Overview](#-overview) • [Architecture](#-architecture) • [Key Features](#-key-features) • [Getting Started](#-getting-started) • [API Reference](#-api-reference) • [Developer Guide](#-developer-guide)
-  
-  </h4>
-</p>
+我们为 WeKnora 增加了一层 **个人知识地图**：把用户自己的行为（**读过什么、引用过什么、认可过什么**）投影到 Wiki 知识网络上，形成一张**可解释、可回放、可删除**的个人知识状态视图，并据此推荐下一步该看什么。
 
-# 💡 WeKnora — Turn Documents into Living Knowledge with RAG, Agents and Auto-Wiki
+课题四是一道**开放题**，只给方向与底线要求，并明确说明「**可以只做其中一部分**」。我们的交付是：
 
-## 📌 Overview
+> **课题给出的四个切入角度，我们全部实现，并让它们互相咬合形成闭环；四条基本要求（底线），逐条达成。**
 
-[**WeKnora**](https://weknora.weixin.qq.com) is an open-source, LLM-powered knowledge framework built for enterprise-grade document understanding, semantic retrieval, and autonomous reasoning.
+### 交付规模一览
 
-https://github.com/user-attachments/assets/19b28ce2-a62f-4f54-b289-c983576259bc
+| 维度 | 规模 | 说明 |
+|---|---|---|
+| 新增后端实现代码 | **2,639 行** | 服务 987 / 仓储 552 / 类型·接口 409 / 接口层 691 |
+| 单元测试 | **44 个测试函数，1,153 行** | 测试与实现比 ≈ **44%**，覆盖水位、预热、分摊、边界、去重、日桶 |
+| 数据库迁移 | **8 组、16 个文件** | PostgreSQL `000093`~`000096` 与 SQLite `000014`~`000017` 双端同步 |
+| 新增数据表 | **6 张专用账本** | 与既有检索重排数据**完全解耦**，删除画像不影响重排 |
+| 对外接口 | **8 个** | 全部挂在 `/api/v1/memory`，路径中不含 subject id |
+| 图接口扩展 | **1 个** | `GET /wiki/graph?mastery=true` 在节点上附带水位、边界标记与最近活跃时间 |
+| 前端交互 | **7 个模块** | 视图开关、水位球、水波动效、档位筛选、下一步推荐、个人画像、图谱扩展 |
+| 可调常量 | **后端 11 个 + 前端 4 个** | 集中定义、双侧同步，业务代码中不写死 |
+| 依赖新增 | **0** | 不依赖 Neo4j，**PostgreSQL 与桌面 Lite（SQLite）均可运行** |
 
-*2:25 · 1080p · English narration & captions.*
+### 三条最有说服力的结论
 
-It is organized around three core capabilities: **RAG-based Quick Q&A** for everyday lookups, a **ReAct Agent** that autonomously orchestrates retrieval, MCP tools, a **tenant skill catalog**, session-persistent **Docker / E2B / Cube sandboxes** and web search to handle complex multi-step tasks, and a brand-new **Wiki Mode** in which agents distill raw documents into a self-maintaining, interlinked markdown knowledge base with an interactive knowledge graph, complete with manual editing, revision history and one-click rollback. **Cross-session long-term memory** remembers who you are and what you keep asking about. Knowledge curation is equally hands-on: a **tree-structured folder view** preserves the directory layout of uploads, and **chunk editing with revision history** lets retrieval chunks be edited, diffed and reverted like documents. Combined with multi-source ingestion (Feishu wiki / Feishu Drive / GitLab / Tencent IMA / Notion / Yuque / RSS, and growing), **website embed widgets** for publishing agents to external sites, **scoped API keys with a principal model** for programmatic integrations, **multi-instance storage backends** per workspace for flexible data placement, 20+ LLM provider integrations (including LiteLLM), full Langfuse observability plus a **runtime task-queue dashboard with worker-pool governance**, **enterprise-ready multi-workspace RBAC** (4-tier role matrix + per-resource ownership + per-workspace audit log), and a fully self-hostable modular architecture, WeKnora turns scattered documents into a queryable, reasoning-capable, continuously evolving knowledge asset.
+1. **度量完全没有模型打分**——刻画状态的是四类**纯行为信号**，每条都来自系统可审计的事件；水位计算是一个**确定性纯函数**，同样的证据集在任何时间调用都得到同一个水位，这是它能被单元测试和离线回放的前提。
+2. **「一个可运行的原型」不是演示壳**——后端 8 接口 + 6 账本 + 双端迁移全部落地，前端水位球、水波、档位筛选、边界涟漪、下一步推荐、画像弹窗、HTML 导出全部可交互，截图取自真实运行实例。
+3. **验证所需的数据基础在实现时就已备好**——日聚合行为桶、曝光三段日志、纯函数水位计算三者共同支撑「时间切分回放」，不需要事后补埋点。
 
-The framework supports auto-syncing knowledge from Feishu, GitLab, Tencent IMA, Notion, and Yuque (more data sources coming soon), handles 10+ document formats including PDF, Word, images, Excel and XMind, and can serve Q&A directly through IM channels like WeCom, Feishu, Slack, and Telegram. It is compatible with major LLM providers including OpenAI, DeepSeek, Qwen (Alibaba Cloud), Zhipu, Hunyuan, Gemini, MiniMax, NVIDIA, LiteLLM, and Ollama. Office files can be parsed in-process with **anydoc**. Its fully modular design allows swapping LLMs, vector databases, and storage backends, with support for local and private cloud deployment ensuring complete data sovereignty. WeKnora also integrates with **Langfuse** for comprehensive observability into agent reasoning, token usage, and pipeline tracing.
+---
 
+## 成果速览
 
-## ✨ Latest Updates
+> 以下截图取自真实运行实例：知识库「测试123」，共 310 个知识节点。
 
-- **v0.8.0** — **Skill sandbox runtime** (session-persistent Docker / E2B / Cube backends with per-tenant network policy; Local host-process backend removed; Docker opt-in); **tenant skill catalog** (install from ClawHub / SkillHub / git / zip, per-sandbox snapshots, live progress, file browse/edit, personal and workspace env vars); **cross-session long-term memory** (profile / preference / fact / task / interest, auto-extract with confirm, `search_memory`); **in-process anydoc office parser**; official **DeepSeek Harness plugin** `@wxg-prc-cpg/dsh-weknora`; GitLab and Tencent IMA data sources; LiteLLM; Exa and Metaso web search; XMind parsing; chat artifacts, question outline and timestamps; context compaction and provider prompt-cache markers. Plus OIDC JWKS verification, optional complex passwords, document auto-tagging, and broad sandbox/security hardening. See [`CHANGELOG.md`](./CHANGELOG.md).
-- **v0.7.2** — Launched the **official product documentation site** (VitePress; six sections, ~50 pages covering ~360 API endpoints and ~150 environment variables, with standalone Docker/Nginx deployment, quickstart sample data and a local MCP demo); **knowledge base folder tree** (upload paths stored as first-class data, browse/rename/re-file documents like a file manager); **chunk editing with revision history** (edit retrieval chunks in the UI, per-version diff and rollback, automatic reindexing, plus custom document metadata); **Wiki page revision history** (snapshots + line-level diff + one-click rollback + in-browser manual editing); **directly loadable file URLs** via `resource_urls=public` / `RESOURCE_URL_MODE` (third-party apps render images and files without a second authenticated proxy call); **Feishu Drive data source** and docx sync through the blocks API; batch document tagging; **MCP Server 1.1.x** (migrated to the mcp 2.x high-level API, official PyPI package `tencent-weknora-mcp`, new `create_knowledge_from_text` and `list_shared_knowledge_bases` for 29 tools total); AWS S3 default credential chain (IAM Role / IRSA); local HTML upload parsing; QQBot markdown replies; new PR CI checks for app / frontend / docreader / mcp-server. Plus large-scale router and `modelcontext` refactors, rerank and chunking quality work, and broad stability fixes. See [`CHANGELOG.md`](./CHANGELOG.md).
-- **v0.7.1** — New **Yunzhijia (云之家) IM integration** (WebSocket + image messages + markdown replies); **Volcengine rerank** provider (with request batching) and **Zhipu AI web search** provider; **platform-scoped API keys** for control-plane automation (tenant management, system settings, runtime queues, audit logs); **per-KB activity audit trail**; FAQ management enhancements (filtering, tagging, export, import tracking); **Langfuse OTLP/OTel tracing** migration with W3C traceparent propagation; chat header actions with one-click **Markdown export** and wiki tool results in the references drawer; prompt-cache observability; session channel governance (admin-scoped IM/embed/API sessions); resilient Feishu large-wiki sync; and removal of the legacy Neo4j conversation-memory dependency. Plus broad slug-integrity, SSRF-transport, and state-sync hardening. See [`CHANGELOG.md`](./CHANGELOG.md).
-- **v0.7.0** — Fine-grained **scoped API keys & principal model** (capability-level grants + per-KB restriction + API integration playground); **runtime task-queue observability dashboard & worker-pool governance** (per-stage pools + per-model concurrency governors + failed-task inspection/retry); **multi-instance storage backends** (multiple storage instances per workspace, per-KB binding, default instance); **session-scoped temporary attachments** (async image/doc parsing + combined limits); question & follow-up suggestions; stable resource registry with LLM-context alias compaction; `@Skill / @MCP` mentions with scoped agent runtime; mid-conversation MCP OAuth; QQBot & Lark (Feishu International) IM integration; Redis TLS; Requesty model provider + Keenable web search; tenantless provisioning & gated self-service workspaces; admin password reset; knowledge base duplicate flow; `weknora` CLI v0.10. Plus broad security hardening (SSRF, secret redaction, SQL validation, IDOR). See [`CHANGELOG.md`](./CHANGELOG.md).
-- **v0.6.3** — Website embed widget & Integrations Center (secure-mode token exchange + rate limits); chat experience overhaul (citation popovers, RAG pipeline progress, streaming markdown); document multi-tag & batch reparse; Wiki folders & hierarchy navigation; RSS data source; MCP OAuth2; EPUB / MHTML parsing; agent model-readiness checks; model test debugger; session source filter; workspace deletion UI. See [`CHANGELOG.md`](./CHANGELOG.md).
-- **v0.6.2** — Per-upload process configuration with upload-confirm dialog; document reparse with `process_config`; `weknora` CLI v0.9 (bundled Agent Skills, `session stop`, auth/profile harmonization); KB marquee multi-select; HNSW index for 1024-dim pgvector embeddings; chat resources store refactor; Langfuse-only tracing (Jaeger removed). See [`CHANGELOG.md`](./CHANGELOG.md).
-- **v0.6.1** — Document parsing trace timeline (Langfuse-style span tree with stage-by-stage progress + stop-parse); OpenSearch vector store driver; declarative built-in models via YAML; system admin & consolidated platform settings + audit log; new-user onboarding guide; settings UI redesign; `weknora` CLI v0.7 / v0.8 (agent-first wire contract, NDJSON, `--dry-run`); OpenDataLoader + PaddleOCR-VL parsers; MCP server multi-transport (stdio / SSE / HTTP); per-model thinking-mode config; Tencent LKEAP rerank + native Gemini embeddings + MiniMax-M3. See [`CHANGELOG.md`](./CHANGELOG.md).
-- **v0.6.0** — Workspace RBAC (4-tier role matrix `Owner` / `Admin` / `Contributor` / `Viewer` + per-KB ownership + per-workspace audit log), workspace member management & multi-workspace UX, self-service workspaces; `weknora` CLI v0.4 GA with `mcp serve`; KB retrieval fan-out across vector stores; AES-256-GCM credential encryption + docreader gRPC TLS + Token; Zhipu embedder + Huawei OBS; server-side user preferences; Go 1.26.0. See [`docs/RBAC说明.md`](./docs/RBAC说明.md) and [`CHANGELOG.md`](./CHANGELOG.md).
-- **v0.5.2** — Wiki ingest scales to 40k-document KBs (task queue + DLQ); MCP human-in-the-loop tool approval; Anthropic / Apache Doris / Tencent VectorDB / KS3 / SearXNG backends; adaptive 3-tier chunking with live preview; global ⌘K command palette; Yuque connector + WeChat Mini Program; `weknora` CLI preview.
-- **v0.5.1** — Knowledge-base batch management; workspace-wide IM channels overview; session search + user-scoped pinning; unified Model / Web Search / MCP settings cards; per-agent LLM timeout; desktop workspace switching.
-- **v0.5.0** — Wiki Mode GA — agents auto-generate structured, interlinked Markdown wiki pages with a knowledge graph; wiki browser + visual graph in the UI.
-- **v0.4.0** — WeKnora Cloud (hosted LLM + parsing); Chrome Extension; ClawHub Skill; WeChat IM; attachment processing; Azure OpenAI / Alibaba OSS; Notion connector; Baidu + Ollama web search; VectorStore management.
-- **v0.3.6** — ASR (audio); Feishu data-source auto-sync; OIDC; IM quote-reply context + thread-based sessions; document summarization; Tavily search; parallel tool calling; agent @mention scope restriction.
-- **v0.3.5** — Telegram / DingTalk / Mattermost IM; IM slash commands + QA queue; suggested questions; VLM auto-describe MCP tool images; Novita AI; channel tracking.
-- **v0.3.4** — WeCom / Feishu / Slack IM; multimodal image support; NVIDIA model API; Weaviate; AWS S3; AES-256-GCM API-key encryption; built-in MCP service; hybrid-search optimization; `final_answer` tool.
-- **v0.3.3** — Parent-child chunking; KB pinning; fallback response; passage cleaning for rerank; storage auto-creation; Milvus.
-- **v0.3.2** — Knowledge Search entry; per-source parser & storage engine config; image rendering in local storage; document preview; Volcengine TOS; Mermaid rendering; batch session management; memory graph preview.
-- **v0.3.0** — Shared Space; Agent Skills + sandboxed execution; custom agents; Data Analyst agent; thinking mode; Bing / Google web search; API Key auth; Helm chart; Korean i18n; Qdrant.
-- **v0.2.0** — Agent Mode (ReACT); multi-type knowledge bases (FAQ + document); conversation strategy config; DuckDuckGo web search; MCP tool integration; new UI with agent mode switching; MQ async task management.
+**① 知识引导图谱 —— 把个人知识状态投影到知识网络上**
 
+初始态：所有节点都是灰球，水位 0%，代表当前用户尚未产生任何行为证据。
 
-## 📱 Interface Showcase
+![知识引导图谱 · 初始态](docs/mastery/images/03-graph-empty.png)
 
-<table>
-  <tr>
-    <td colspan="2" align="center"><b>🛠️ Skill Sandbox Chat · generate and preview a Word file</b><br/><img src="./docs/images/skill-sandbox-chat.png" alt="Skill sandbox conversation generating and previewing a Word document" width="100%"></td>
-  </tr>
-  <tr>
-    <td width="50%" align="center"><b>📦 Skill Catalog · install onto an E2B sandbox</b><br/><img src="./docs/images/skill-catalog.png" alt="Workspace skill catalog with docx pptx pdf installed on E2B" width="100%"></td>
-    <td width="50%" align="center"><b>🤖 Agent Mode · search, read a skill, write sandbox files</b><br/><img src="./docs/images/agent-qa.png" alt="Agent searching the knowledge base, reading the docx skill, and writing a sandbox script" width="100%"></td>
-  </tr>
-  <tr>
-    <td colspan="2" align="center"><b>💬 Intelligent Q&A Conversation</b><br/><img src="./docs/images/qa.png" alt="Intelligent Q&A Conversation" width="100%"></td>
-  </tr>
-  <tr>
-    <td width="50%" align="center"><b>📖 Wiki Browser</b><br/><img src="./docs/images/wiki-browser.png" alt="Wiki Browser" width="100%"></td>
-    <td width="50%" align="center"><b>🕸️ Wiki Knowledge Graph</b><br/><img src="./docs/images/wiki-graph.png" alt="Wiki Knowledge Graph" width="100%"></td>
-  </tr>
-  <tr>
-    <td width="50%" align="center"><b>🕘 Wiki Page Revision History & Rollback</b><br/><img src="./docs/images/wiki-revision-history.png" alt="Wiki Page Revision History and Rollback" width="100%"></td>
-    <td width="50%" align="center"><b>✂️ Chunk Editing & Revision History</b><br/><img src="./docs/images/kb-chunk-edit.png" alt="Chunk Editing and Revision History" width="100%"></td>
-  </tr>
-  <tr>
-    <td width="50%" align="center"><b>📁 Folder Tree & Batch Operations</b><br/><img src="./docs/images/kb-document-list.png" alt="Knowledge Base Folder Tree and Batch Operations" width="100%"></td>
-    <td width="50%" align="center"><b>🔭 Observability · Langfuse Tracing</b><br/><img src="./docs/images/langfuse.png" alt="Observability Langfuse Tracing" width="100%"></td>
-  </tr>
-</table>
+产生行为证据后：节点内出现水位——蓝水表示接触 / 熟悉，金水表示高证据活跃，水位高度即十档掌握度。
 
-## 🏗️ Architecture
+![知识引导图谱 · 有水位](docs/mastery/images/04-graph-water.png)
 
-![weknora-architecture.png](./docs/images/architecture.png)
+**② 个人知识画像 —— 可查看、可导出、可删除**
 
-Fully modular pipeline from document parsing, vectorization, and retrieval to LLM inference — every component is swappable and extensible. Supports local / private cloud deployment with full data sovereignty and a zero-barrier Web UI for quick onboarding.
+画像弹窗：四档概览（掌握 / 熟悉 / 接触 / 不了解）+ 节点明细表（按水位降序），底部提供「导出 HTML」与「删除画像」。
 
-## 🧩 Feature Overview
+![个人知识画像弹窗](docs/mastery/images/01-profile-dialog.png)
 
-**Intelligent Conversation**
+导出报告：自包含单页 HTML（无外部依赖、可离线打开），按「页面类型 → 档位」分组，含四档概览与分布条。
 
-| Capability | Details |
-|------------|---------|
-| Intelligent Reasoning | ReACT progressive multi-step reasoning, autonomously orchestrating knowledge retrieval, MCP tools, skill sandboxes, and web search |
-| Quick Q&A | RAG-based Q&A over knowledge bases for fast and accurate answers |
-| Wiki Mode | Agent-driven auto-generation of structured, interlinked markdown Wiki pages from raw documents; in-browser manual editing, page revision history, line-level diff and one-click rollback |
-| Skill Catalog & Sandbox | Workspace skill catalog (ClawHub / SkillHub / git / zip) installed onto session-persistent Docker / E2B / Cube sandboxes; `shell_exec`, file tools, artifacts, per-config network policy; Local host-process backend removed |
-| Long-term Memory | Cross-session memory (profile / preference / fact / task / interest) with auto-extract, user confirm, and on-demand `search_memory` |
-| Tool Calling | Built-in tools, MCP tools (incl. OAuth2 remote services, mid-conversation OAuth), web search; `@Skill / @MCP` mentions to scope the agent runtime per turn |
-| Conversation Strategy | Online Prompt editing, retrieval threshold tuning, multi-turn context awareness, per-agent citation output toggle |
-| Suggested Questions | Auto-generated question suggestions and after-answer follow-ups based on knowledge base content |
-| Temporary Attachments | Session-scoped image / document uploads with async parsing for one-off Q&A, with a combined image + attachment limit |
-| Citations & RAG Progress | Inline citation popovers and a references drawer (web / KB source distinction), shared markdown rendering, and stage-by-stage RAG pipeline progress in chat |
-| Session Management | Filter and group sidebar sessions by source (Web / IM / Embed), with inline session-title rename |
+![导出的 HTML 报告](docs/mastery/images/02-profile-report.png)
 
-**Knowledge Management**
+---
 
-| Capability | Details |
-|------------|---------|
-| Knowledge Base Types | FAQ / Document / Wiki with folder import, URL import, multi-tag management, and online entry |
-| Folder Tree | Folder uploads keep their original directory structure, with a sidebar tree for browsing, folder rename, and re-filing documents into another folder |
-| Chunk Editing & Revisions | Edit retrieval chunks directly in the UI with per-version snapshots, diff and one-click rollback, and automatic reindexing after an edit; generated questions can be added, edited, deleted and regenerated; custom document metadata supported |
-| Per-Upload Process Config | Override parser, chunking, multimodal (VLM / ASR), graph extraction, and question generation per upload batch via upload-confirm dialog or `process_config` API; reparse with new settings |
-| Batch Reparse | Re-queue parsing for multiple documents at once with optional per-batch `process_config` |
-| Data Source Import | Auto-sync from Feishu wiki / Feishu Drive / Lark / GitLab / Tencent IMA / Notion / Yuque / RSS feeds (more data sources coming soon); incremental and full sync |
-| Document Formats | PDF / Word / Txt / Markdown / HTML / EPUB / MHTML / Images / CSV / Excel / PPT / JSON / XMind |
-| Auto-Tagging | After parse, pick matching tags from the knowledge base's existing set without creating tags or overwriting manual ones |
-| Retrieval Strategies | BM25 sparse / Dense retrieval / GraphRAG / parent-child chunking / HNSW-accelerated pgvector (1024-dim) / multi-dimensional indexing |
-| Batch Selection & Tagging | Marquee drag-select multiple documents in the KB list for batch reparse and batch tagging (common tags pre-selected) |
-| E2E Testing | Full-pipeline visualization with recall hit rate, BLEU / ROUGE metric evaluation |
+## 一、课题四指标达成对照
 
-**Integrations & Extensions**
+> 本章是本文档的核心：把课题给出的**每一个切入点**与**每一条基本要求**，逐条对照我们的交付物与可核验证据。
 
-| Capability | Details |
-|------------|---------|
-| LLMs | OpenAI / Azure OpenAI / Anthropic (Claude) / DeepSeek / Qwen (Alibaba Cloud) / Zhipu / Hunyuan / Doubao (Volcengine) / Gemini / MiniMax / NVIDIA / Novita AI / SiliconFlow / OpenRouter / Requesty / LiteLLM / Ollama |
-| Embeddings | Ollama / BGE / GTE / Zhipu / OpenAI-compatible APIs |
-| Vector DBs | PostgreSQL (pgvector) / Elasticsearch / OpenSearch / Milvus / Weaviate / Qdrant / Apache Doris / Tencent VectorDB |
-| Object Storage | Local / MinIO / AWS S3 (IAM Role / IRSA default credential chain) / Volcengine TOS / Alibaba Cloud OSS / Kingsoft Cloud KS3 / Huawei Cloud OBS; **multiple storage instances per workspace** with per-KB binding and a default instance |
-| IM Channels | WeCom / Feishu / Lark (Feishu International) / QQBot / Slack / Telegram / DingTalk / Mattermost / WeChat / Yunzhijia |
-| Website Embed | Publish agents via embed widget with domain allowlists, rate limits, and secure-mode token exchange |
-| Web Search | DuckDuckGo / Bing / Google / Tavily / Baidu / Ollama / SearXNG / Keenable / Zhipu AI / Exa / Metaso |
-| API Integration | Scoped API keys (capability-level grants + per-KB restriction + throttled last-used tracking) with an API integration playground; MCP OAuth and embed sessions isolated per principal; `resource_urls=public` returns directly loadable file/image URLs, removing the second authenticated proxy call |
-| MCP Server | Official PyPI package `tencent-weknora-mcp` with 29 tools over stdio / SSE / HTTP transports |
+### 1.1 四个切入角度：全部实现
 
-**Platform**
+课题原文说明「**可以只做其中一部分，也可以提出完全不同的方案**」。我们**四个角度全部实现**，并让它们互相咬合形成闭环：关联决定节点粒度，度量决定水位算法，引导消费水位产出推荐，呈现把整条链路可视化。
 
-| Capability | Details |
-|------------|---------|
-| Deployment | Local / Docker / Kubernetes (Helm) with private and offline support |
-| UI | Web UI / RESTful API / CLI (`weknora`) / Chrome Extension / Website Embed Widget / WeChat Mini Program |
-| Access Control | Workspace RBAC with 4-tier role matrix (Owner / Admin / Contributor / Viewer), per-KB resource ownership, per-workspace audit log, invite-only workspaces, tenantless provisioning & gated self-service workspace creation, admin password reset (session revocation), cross-workspace superuser, scoped API keys |
-| Security | AES-256-GCM at-rest encryption for API keys and MCP / data-source credentials with graceful key rotation; gRPC TLS + Token between app and docreader; Redis TLS; SSRF-safe HTTP client (data sources, URL import, redirect chains); secret redaction in responses; skill sandbox isolation (Docker opt-in / E2B / Cube) with per-config network policy; OIDC ID-token JWKS verification; optional complex-password policy |
-| Observability | Integrated Langfuse (sole tracing backend) for ReAct loops, token tracking, tool calls, and pipeline tracing; built-in Langfuse-style document parsing trace timeline with stage-by-stage progress; system-admin runtime task-queue dashboard (queue depth, per-model concurrency, failed-task inspection & manual retry) |
-| Task Management | MQ async tasks with per-stage worker-pool governance (core / post-process / enrichment / maintenance + elastic shared pool, plus an independent Wiki pool) and per-model background concurrency governors; automatic database migration on version upgrade |
-| Model Management | Centralized config, declarative built-in models via YAML, per-knowledge-base model selection, per-model thinking-mode and embedding-dimension overrides, interactive model test debugger, multi-workspace built-in model sharing, WeKnora Cloud hosted models and parsing |
+#### 角度一：关联 —— 记忆条目与知识内容如何建立映射
 
-## 🧩 Chrome Extension
+**课题问的是**：记忆条目与知识内容如何建立映射，知识节点取 Wiki 页面、图谱实体还是别的粒度？
 
-[**WeKnora Chrome Extension**](https://chromewebstore.google.com/detail/jpemjbopikggjlmikmclgbmkhhopjdgd) lets you capture web content directly into your WeKnora knowledge base. Select text, images, or entire pages in the browser and save them as knowledge entries with one click — no copy-paste or file upload needed.
+**我们的回答：选择 Wiki 页面作为节点粒度**，而不是图谱实体或别的粒度。四条理由：
 
+| 理由 | 说明 |
+|---|---|
+| 已有个人 overlay 基础 | Wiki 图本就支持按人高亮（Familiar），把「二值高亮」升级为「多档状态」成本最低 |
+| **零额外部署** | 实体图谱依赖 Neo4j + APOC；Wiki 图不需要，**桌面 Lite 版（SQLite）同样可跑** |
+| 映射自然 | 页面的 `SourceRefs` 直接支持「来源文档 → 页面」的反查 |
+| 可解释 | 页面可以直接打开，用户能看懂「点亮的到底是什么」 |
 
-## 📱 WeChat Mini Program
+**投影链路（四类信号 → 页面）**：
 
-The [WeKnora Mini Program](./miniprogram/README.md) provides a lightweight mobile client for configuring WeKnora API access, selecting knowledge bases, importing URLs, and asking knowledge chat from WeChat.
-
-
-## 🦞 ClawHub Skill
-
-[**WeKnora ClawHub Skill**](https://clawhub.ai/lyingbug/weknora) is a WeKnora skill published on the ClawHub platform. Once installed, it enables document import (file / URL / Markdown), hybrid search (vector + keyword) across knowledge bases, and knowledge entry management — all through the WeKnora REST API.
-
-- **Document Import** — Upload files, import web pages, or write Markdown knowledge via the agent
-- **Hybrid Search** — Search within or across knowledge bases with vector + keyword retrieval
-- **Knowledge Management** — List, browse, edit, and delete knowledge entries programmatically
-
-## 🐋 DeepSeek Harness Plugin
-
-[**`@wxg-prc-cpg/dsh-weknora`**](https://www.npmjs.com/package/@wxg-prc-cpg/dsh-weknora) is the official [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) plugin ([docs](./packages/dsh-weknora/README.md)). The harness ships no retrieval, embedding or knowledge-base capability of its own, so the plugin gives a coding agent your documents: `dsh plugin --profile web add @wxg-prc-cpg/dsh-weknora`, point it at a deployment, and four read-only tools appear in the agent's tool set.
-
-- **`weknora_search`** — hybrid retrieval returning source passages verbatim, each with a reusable `knowledge_id`
-- **`weknora_read_document`** — one document's passages reassembled in order, with paging
-- **`weknora_ask`** — WeKnora's own composed answer with citations, over the RAG or the ReAct pipeline
-- **`weknora_list_knowledge_bases`** — knowledge base names and ids, so the agent can scope its own search
-
-## ⌨️ Command-Line Interface
-
-`weknora` is the official CLI for driving the API from a terminal or an AI
-agent. It is **agent-first**: every command emits a stable JSON envelope by
-default (with typed error codes mapped to exit codes), and `--format text`
-renders for humans. It also serves a curated MCP tool surface
-(`weknora mcp serve`) and ships bundled Agent Skills.
-
-```bash
-weknora profile add prod --host https://kb.example.com --use
-weknora auth login
-weknora kb list
-weknora link --kb my-knowledge-base    # bind the current directory
-weknora doc upload notes.md
-weknora chat "summarise the design doc"
+```
+引用：memory_citations.knowledge_id    → WikiPage.SourceRefs 反查 → 页面
+点赞：memory_answer_likes 的分摊权重   → 同一条 SourceRefs 路径 → 页面
+浏览：memory_page_views.slug           → 直接落页，无需映射
+预热：memory_spread_views.slug         → 由相邻页面的阅读带动，直接落页
 ```
 
-For headless / CI use, set `WEKNORA_API_KEY` + `WEKNORA_HOST` and skip
-`auth login` entirely — no credentials written to disk.
+**页面类型差异化处理**：Wiki 页面有 6 种类型，作为知识节点的可靠性不同，需区别对待：
 
-See [`cli/README.md`](./cli/README.md) for install + 5-minute quickstart and
-[`cli/AGENTS.md`](./cli/AGENTS.md) for the operational contract AI agents rely on.
+| 页面类型 | 作为知识节点的处理 |
+|---|---|
+| `summary` | 单篇源文档摘要页，与来源文档一一对应，**映射最可靠** |
+| `entity` / `concept` | 多篇来源文档聚合，对证据做衰减聚合，避免单篇主导 |
+| `index` | Wiki 级索引页，不承载知识内容，**不作为掌握节点** |
+| `synthesis` / `comparison` | Agent 生成的独立页面，主要靠浏览证据 |
 
-## 🚀 Getting Started
+#### 角度二：度量 —— 用什么信号刻画掌握程度，如何避免模型主观打分
 
-### 🛠 Prerequisites
+**这是本课题的核心约束，我们的做法是：完全不用模型打分。**
 
-- [Docker](https://www.docker.com/) & [Docker Compose](https://docs.docker.com/compose/)
-- [Git](https://git-scm.com/)
+刻画状态的是**四类纯行为信号**，每一条都来自系统可审计的事件，不含任何模型判断：
 
-### 📦 Installation & Launch
+| 信号 | 语义 | 权重 | 封顶 |
+|---|---|---|---|
+| **引用** | 系统关联：该文档进入了最终回答（弱证据） | `CitationWeight = 1` | `CitationCap = 3` |
+| **浏览** | 直接接触：用户主动打开并有效停留（强证据） | `ViewWeight = 2` + 每 60 秒 1 分 | 单次 300 秒 |
+| **点赞** | 间接认可：用户认可整条回答 | `LikeWeight = 2` | 总增益次线性封顶，按引用位置分摊 |
+| **邻居预热** | 周围阅读带来的温度（第四类，见 2.7） | 源页阅读时长的 20% | `SpreadCap = 6` |
 
-```bash
-git clone https://github.com/Tencent/WeKnora.git
-cd WeKnora
-cp .env.example .env   # Edit .env as needed, see comments in the file
-docker compose pull     # Pull the latest images
-docker compose up -d    # Start core services
+**四者回答不同的问题**，因此不做单一权重链，而是按各自语义分别加权：
+
+- 引用回答「系统是否关联了该文档」
+- 浏览回答「是否真的接触了这个页面」
+- 点赞回答「这条回答是否有用」
+- 预热回答「这个节点是否被周围的阅读带动了」
+
+**行为分层原则**：只统计强行为，**不统计系统内部过程**——「被检索到」出现在候选集里不算证据，因为用户未必看到它。
+
+**水位：十档百分比**
+
+```
+score = min(引用, 3) × 1 + 浏览 × 2 + 时长/60 + 点赞 × 2
+
+ 0               无证据
+ 10 / 20 / 30    接触（TouchScore = 1 起）
+ 40 / 50 / 60    熟悉（FamiliarScore = 4 起）
+ 70 / 80 / 90    掌握（MasteredScore = 8 起）
+ 100             饱和（SatScore = 12）
 ```
 
-Once started, visit **http://localhost** to get started.
+`Level(cfg, evidence, now)` 是一个**确定性纯函数**——无模型、无隐藏状态、无随机性。同样的证据集，任何时间调用都得到同一个水位，这是它能被单元测试和离线回放的前提。
 
-> To use a local Ollama model, run `ollama serve > /dev/null 2>&1 &` first.
+#### 角度三：引导 —— 依据掌握情况推荐下一步，形成可迭代闭环
 
-### 🔄 Upgrading
+**PPR 识别知识边界**：从用户的高证据活跃节点出发，在全网计算个性化 PageRank，筛选出「低证据但靠近用户知识区域」的节点，得到边界候选集。
 
-If you already have WeKnora running and downloaded a newer release:
+**用户点击某个节点时**，在该节点的**一跳邻居**（出链 ∪ 入链）中筛出边界候选：
 
-```bash
-# Set WEKNORA_VERSION in .env to the target release (e.g. 0.7.0), or keep latest
-docker compose pull     # Pull images matching WEKNORA_VERSION
-docker compose up -d    # Recreate containers with new images
+- **排除**：当前节点、`index` 页、水位 ≥ 40 的已熟悉节点、不可打开的页面
+- **排序**：PPR 边界分数降序 → 当前水位越低越优先 → 页面类型（summary / entity / concept 优先） → 标题兜底
+- 最多取 **3 个**；没有合适候选就**不显示，不强行推荐**
+- **冷启动**（无高证据节点）时不产生任何推荐
+
+**闭环已经闭合**，不是一次性推荐：
+
+```
+展示（记曝光 + 位次）
+   ↓
+点击（记点击）
+   ↓
+有效浏览（记合格浏览 ← 唯一的「推荐有效」回报信号）
+   ↓
+沉淀进日聚合桶，供离线回放评估与未来的策略学习
 ```
 
-> `docker compose up -d` alone reuses locally cached images and may leave the UI version out of sync with the release you downloaded.
+「点击」与「有效浏览」**分开记录**——只有页面真的被停留阅读才算回报，避免把误点当成正反馈。
 
-### 🔧 Optional Services (Docker Compose Profiles)
+**推荐与涟漪是同一套机制的两个表现层**：涟漪在地图上提示「这些相邻节点值得探索」，下一步推荐把其中最值得先看的 1~3 个节点明确列出。两者共用同一批候选，**不建立第二套推荐逻辑，也不引入新的推荐算法**。
 
-Add `--profile` flags to enable additional components. Multiple profiles can be combined:
+#### 角度四：呈现 —— 知识网络如何可视化，「点亮」过程如何被感知
 
-| Profile | Description | Command |
-|---------|-------------|---------|
-| _(default)_ | Core services | `docker compose pull && docker compose up -d` |
-| `full` | All features | `docker compose --profile full pull && docker compose --profile full up -d` |
-| `neo4j` | Knowledge Graph (Neo4j) | `docker compose --profile neo4j pull && docker compose --profile neo4j up -d` |
-| `minio` | Object Storage (MinIO) | `docker compose --profile minio pull && docker compose --profile minio up -d` |
-| `langfuse` | Tracing (Langfuse) | `docker compose --profile langfuse pull && docker compose --profile langfuse up -d` |
+| 视觉元素 | 表达内容 |
+|---|---|
+| 灰色空球 | 暂无行为证据（水位 0%） |
+| 白水 / 蓝水 / 金水 | 接触（10~30%）/ 熟悉（40~60%）/ 高证据活跃（70~90%） |
+| 球内水位高度 | 十档水位 |
+| 水面微波 | 近期活跃（最近 7 天有交互），与水位高度无关 |
+| 满格静止金球 | 证据饱和（100%），无波动 |
+| 水面趋于平静 | 长期未接触，水位回落但保留痕迹 |
 
-Combine profiles: `docker compose --profile neo4j --profile minio pull && docker compose --profile neo4j --profile minio up -d`
+**「点亮」的感知路径**：用户提问（引用文档）或主动阅读 → 对应节点水位逐步上升 → 0% → 接触 → 熟悉 → 掌握 → 饱和；反过来长期不接触则回落。
 
-Stop services: `docker compose down`
+**配套交互**：一个**开关**把「正常浏览」和「学习视角」隔离开（默认关闭、状态持久化）；点击节点后相邻节点关系高亮、边界候选同步淡金涟漪；支持按状态档筛选（接触 / 熟悉 / 掌握 / 全部）；另有 Bloom（扩张邻居）与 Grow Frontier（沿前沿生长）两条图谱扩展路径，用于聚焦后继续探索。
 
-### 🌐 Service URLs
+### 1.2 四条基本要求：逐条达成
 
-| Service | URL |
-|---------|-----|
-| Web UI | `http://localhost` |
-| Backend API | `http://localhost:8080` |
-| Langfuse Tracing | `http://localhost:3000` |
+| 课题基本要求 | 我们的交付 | 可核验位置 |
+|---|---|---|
+| **① 一份设计说明**，讲清知识节点与掌握度的定义、数据来源与评估方式 | 《课题四_知识网络与引导式学习_重构方案》：17 章，覆盖操作性定义、信号来源、节点粒度、映射规则、证据集抽象、四算法职责、参数表、验证方式，并**明确声明语义边界** | 仓库根目录方案文档；本文档第二~三章 |
+| **② 一个可运行的原型**，不要求覆盖所有角度 | 后端 8 个接口 + 6 张账本 + 双端迁移；前端水位球渲染、水波、档位筛选、下一步推荐、个人画像弹窗、HTML 导出。**不依赖 Neo4j，PostgreSQL 与 SQLite Lite 均可运行** | 第四章；本文档成果速览截图 |
+| **③ 一种验证有效性的方式**，离线评估、小规模试用或对照实验均可 | **离线回放（时间切分）为首选方案**，数据基础（日聚合桶 + 曝光三段日志 + 纯函数水位）已全部就位；另备小规模试用与负面效果评估方案 | 第五章 |
+| **④ 学习画像按租户隔离，用户可查看、导出与删除** | 全部读写经过 `ResolveScope` / `scoped()` 按「租户 + 用户」隔离；**查看（JSON）、导出（自包含 HTML）、删除（二次确认、只清专用数据）** 三项齐备，并额外提供「关闭」开关 | 第六章 |
 
-## MCP Server
+### 1.3 达成度总表
 
-Please refer to the [MCP Configuration Guide](./mcp-server/MCP_CONFIG.md) for the necessary setup.
+| # | 课题指标 | 达成 | 证据 |
+|---|---|---|---|
+| 角度一 | 关联：映射方式与节点粒度 | ✅ | 选 Wiki 页面为节点；四路映射链路；`SourceRefs` 反查 |
+| 角度二 | 度量：避免模型主观打分 | ✅ | 四类纯行为信号；确定性纯函数 `Level()`；**零模型判断** |
+| 角度三 | 引导：推荐下一步 + 可迭代闭环 | ✅ | PPR 边界识别；一跳邻居取交集；曝光→点击→合格浏览三段闭环 |
+| 角度四 | 呈现：可视化 + 「点亮」可感知 | ✅ | 十档水位球；水波动效；档位筛选；边界涟漪；截图见成果速览 |
+| 要求一 | 设计说明 | ✅ | 17 章方案文档 + 本文档 |
+| 要求二 | 可运行原型 | ✅ | 8 接口 + 6 账本 + 16 迁移文件 + 前端 7 模块 |
+| 要求三 | 验证有效性的方式 | ✅ | 离线回放方案 + 数据基础全部就位（第五章） |
+| 要求四 | 租户隔离 + 查看 / 导出 / 删除 | ✅ | `scoped()` 隔离 + 3 个画像接口 + 前端弹窗 |
+| 额外 | 用户可关闭功能 | ✅ | 引导视图开关，持久化到 `localStorage`，「关闭 ≠ 删除」 |
+| 额外 | 桌面 Lite 版可用 | ✅ | 不依赖 Neo4j；SQLite 迁移同步落地 |
 
-## 🔌 Using WeChat Dialog Open Platform
+> **注**：课题原文对「可运行的原型」只要求「不要求覆盖上述所有角度」，我们**四个角度全部覆盖**，属于超出底线的交付。
 
-WeKnora serves as the core technology framework for the [WeChat Dialog Open Platform](https://chatbot.weixin.qq.com), providing a more convenient usage approach:
+---
 
-- **Zero-code Deployment**: Simply upload knowledge to quickly deploy intelligent Q&A services within the WeChat ecosystem, achieving an "ask and answer" experience
-- **Efficient Question Management**: Support for categorized management of high-frequency questions, with rich data tools to ensure accurate, reliable, and easily maintainable answers
-- **WeChat Ecosystem Integration**: Through the WeChat Dialog Open Platform, WeKnora's intelligent Q&A capabilities can be seamlessly integrated into WeChat Official Accounts, Mini Programs, and other WeChat scenarios, enhancing user interaction experiences
+## 二、靠什么实现：核心机制
 
+### 2.1 个人知识状态的操作性定义（先立边界）
 
+> 在 WeKnora 当前可观测行为的范围内，基于用户对知识内容的回答点赞、反复引用与主动浏览，形成的一种**可解释的个人知识关联与活跃状态估计**。它表达的是「用户与这个知识节点的关联强度与近期活跃度」，**而不是对用户真实认知能力的绝对判断**。
 
-## 📘 API Reference
+这条边界贯穿命名、分数、交互与验证：
 
-**Official product documentation**: [`website-docs/`](./website-docs/README.md) — the complete documentation set organized as Getting Started → Architecture → Features → API → Clients → Development, covering ~360 API endpoints, ~150 environment variables, and 9 extension points. The directory is also a VitePress site: run `cd website-docs && npm install && npm run dev` to preview locally, or deploy it standalone with the `Dockerfile` inside.
+- **引用 ≠ 理解**，**浏览 ≠ 读懂**，**点赞认可的是「回答」而非「逐篇文档」**，**被检索到 ≠ 用户看到**
+- 产品侧统一叫「个人知识状态」或「熟悉证据水位」，不做成「认知掌握率」
+- 「掌握」是 UI 标签，语义为「高证据活跃」
 
-Troubleshooting FAQ: [Troubleshooting FAQ](./docs/QA.md)
+### 2.2 三类信号 + 一类预热
 
-Detailed API documentation is available at: [API Docs](./docs/api/README.md)
+**信号一：文档引用**（复用既有链路，双写独立账本）
 
-Product plans and upcoming features: [Roadmap](./docs/ROADMAP.md)
-
-## 🧭 Developer Guide
-
-### ⚡ Fast Development Mode (Recommended)
-
-If you need to frequently modify code, **you don't need to rebuild Docker images every time**! Use fast development mode:
-
-```bash
-# Start infrastructure
-make dev-start
-
-# Start backend (new terminal)
-make dev-app
-
-# Start frontend (new terminal)
-make dev-frontend
+```
+用户提问 → 回答引用文档 → qa.go: recordAnswerSources
+  → memory_doc_affinity：hits + 1（供现有重排用）
+  → 同时双写 memory_citations（供知识引导专用）
 ```
 
-**Development Advantages:**
-- ✅ Frontend modifications auto hot-reload (no restart needed)
-- ✅ Backend modifications quick restart (5-10 seconds, supports Air hot-reload)
-- ✅ No need to rebuild Docker images
-- ✅ Support IDE breakpoint debugging
+**与重排完全解耦**：知识引导读独立的 `memory_citations`，这样「删除画像」不会影响现有的检索个性化。
 
-**Detailed Documentation:** [Development Environment Quick Start](./docs/开发指南.md)
+**信号二：有效浏览时长**（新增，轻量埋点）
 
+上报的是「有效浏览时长」而非「页面打开时长」，前端做四层清洗：
 
-## 🤝 Contributing
+| 清洗规则 | 实现 |
+|---|---|
+| 极短停留不计入 | `PAGE_VIEW_MIN_SECONDS = 5`，低于此值视为误点 |
+| 超长停留封顶 | `PAGE_VIEW_MAX_SECONDS = 300`，且**服务端二次钳制**，客户端被篡改也无法刷高 |
+| 失焦暂停 | 计时器仅在 `document.visibilityState === 'visible'` 时累计 |
+| 同页去重 | 同一天内重复打开只折叠次数、时长照常累计（见 2.6） |
 
-Welcome to submit [Issues](https://github.com/Tencent/WeKnora/issues) or Pull Requests.
+另外，**浏览埋点覆盖两条路径**：图谱抽屉与普通阅读器都会计时结算，切换页面时「先结算旧页、再启动新页」，且结算函数返回 Promise，供切回图谱前 `await`——避免「新页图谱先拉、旧页证据后写」的竞态。
 
-**Process:** Fork → Create branch → Commit changes → Open PR
+**信号三：回答点赞**（新增，对整条回答的认可）
 
-**Standards:** Format code with `gofmt`, follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:` / `fix:` / `docs:` / `test:` / `refactor:`)
-
-### Validation
-
-For a focused PR, validate the changed scope first:
-
-```bash
-git fetch origin main
-git diff --check origin/main...HEAD
-golangci-lint run --new-from-rev=origin/main ./...
-go test ./path/to/changed/package -count=1
+```
+点赞 AI 回答（可撤销）
+  → 保存「回答消息 + 引用文档分摊快照」
+  → 总增益次线性封顶：1 篇 = 1.0，2~3 篇 = 1.3，4 篇以上 ≤ 1.5
+  → 按引用位置衰减分摊到每篇来源（credited_weight）
+  → 取消点赞时按快照精确回滚
 ```
 
-Run `gofmt` on changed Go files before committing. For frontend changes, run the relevant tests from `frontend/` and use `npm run type-check` when the change affects TypeScript or Vue components.
+保存**分摊快照**（而非仅文档 ID）是为了取消点赞能精确回滚；次线性封顶是为了避免「一条长答案把整片图迅速点亮」。
 
-The full maintainer gate remains:
+**信号四：邻居预热**（详见 2.7）
 
-```bash
-make fmt
-make lint
-make test
+### 2.3 水位：确定性纯函数
+
+水位计算接收一个「证据集」，输出十档百分比。它**不依赖任何隐藏状态**——给定证据集与时间点，就能重算出当时的水位。
+
+```
+Level(config, evidence, now) → { level: 0..100, tier: none|touch|familiar|mastered }
+
+evidence = {
+    引用:  { cite_count, last_cited_at }
+    浏览:  { view_count, total_duration, last_view_at, 分日切片 }
+    点赞:  { like_credit, last_liked_at }
+    预热:  { 分日切片 }
+}
 ```
 
-`make fmt` formats the entire Go repository, so run it only with a clean worktree and review the resulting diff. Some full-suite tests require local infrastructure or service configuration. If a full check fails for an unrelated baseline or environment reason, include the exact command and failure in the PR while still providing passing targeted tests for your change.
+**可回放性是刻意的设计目标**：正因为水位是纯函数，「时间切分回放」不需要重跑历史代码——只要能从日聚合桶重建证据集，就能算出任意历史时点的水位。
 
-## 🔒 Security Notice
+### 2.4 衰减：五条规则
 
-**Important:** Starting from v0.1.3, WeKnora includes login authentication functionality to enhance system security. For production deployments, we strongly recommend:
+衰减负责水位回落，由五条规则共同刻画：
 
-- Deploy WeKnora services in internal/private network environments rather than public internet
-- Avoid exposing the service directly to public networks to prevent potential information leakage
-- Configure proper firewall rules and access controls for your deployment environment
-- Regularly update to the latest version for security patches and improvements
+**① 分信号独立衰减**
 
-## 👥 Contributors
+```
+score = 引用 × decay(LastCitedAt)
+      + Σ 每日浏览 × decay(该日)
+      + 点赞 × decay(LastLikedAt)
+      + Σ 每日预热 × decay(该日)
+```
 
-Thanks to these excellent contributors:
+若用**单个时间戳衰减全部证据**，「今天一次 5 秒的扫视」就会给「一个月前积累的阅读」整体保鲜，高估节点的新鲜度。
 
-[![Contributors](https://contrib.rocks/image?repo=Tencent/WeKnora)](https://github.com/Tencent/WeKnora/graphs/contributors)
+**② 分日切片**
 
-## 📄 License
+浏览与预热进一步**按日历日切片**，每一天的阅读各自承担自己的衰减。汇总行只有一个「最近浏览时间」，直接衰减它仍会犯上面同样的错误——切片是把这个纠正下沉到日粒度。
 
-This project is licensed under the [MIT License](./LICENSE).
-You are free to use, modify, and distribute the code with proper attribution.
+**③ 衰减有下限（`DecayFloor = 0.35`）**
+
+节点回落到**沉寂**，而不是退回**从未接触**。学习痕迹始终可见，也不会因为忙了几天就像白学了。
+
+**④ 饱和单向**
+
+证据累积到 `SatScore` 之后**恒为 100%**。已经充分建立的节点不因一段时间未访问而掉档。
+
+**⑤ 冷端折叠（性能）**
+
+超过 `ColdHorizon()` 的信号衰减因子都已贴在下限上，逐日展开与折叠求和**完全等价**——因此冷端日桶可以被安全折叠，无需把「每个访问过的页面 × 每一天」都加载进来。
+
+`ColdHorizon = ln(1 / DecayFloor) × HalfLifeDays + 1`（默认 0.35 与 30 天，约 32.5 天）。折叠不是近似而是等价：早于地平线的每一天，其衰减因子都已触到下限，把若干天求和再乘同一个下限因子，与逐日展开完全一致——这一点由**等价性测试**钉住。
+
+### 2.5 参数不是随手取的：五条一致性约束
+
+所有常量集中在 `internal/application/service/mastery/config.go`，并且彼此之间存在**可验证的约束关系**：
+
+| 约束 | 含义 |
+|---|---|
+| `ViewWeight(2) ≥ LikeWeight(2) > CitationWeight(1)` | 证据强度单调：直接接触 ≥ 间接认可 > 系统关联 |
+| `ViewWeight + 300 × DurationWeight = 7 < SatScore(12)` | **单次挂机浏览不可能饱和**——上限与饱和阈值是一组耦合常量 |
+| `CitationWeight(1) = TouchScore(1)` | 一次引用恰好落在接触档起点，与「引用即接触」的语义对齐 |
+| `CitationCap(3) < MasteredScore(8)` | 防单篇主导：引用再多也进不了掌握档 |
+| `SpreadCap(6) < MasteredScore(8)` | 借来的温度进不了掌握档 |
+
+调整其中任何一个，都必须复核与它耦合的另一个——这一点已写在代码注释里。
+
+### 2.6 同页去重：按天折叠
+
+**规则**：同一节点在**同一天（服务器本地日历日）**内重复打开，只折叠「浏览次数」，**「浏览时长」照常累计**；当天起点固定（同一天内不刷新 `last_view_at`），连续刷不会延长计数。
+
+**为什么按天，而不是 30 分钟窗？**
+
+30 分钟窗下，「每半小时点一次」三小时就能攒满 6 次重复（`6 × 2 = 12 ≥ SatScore`）把节点推到**永久饱和**。按天后，最省力的路径变成「**连续 6 天各来一次**」——从「手速刷」变成「真的坚持了六天」。
+
+**为什么只折次数、不折时长？**
+
+- 要挡的是**次数刷分**：反复开关同一页面 6 次（约 30 秒操作）就能靠 `ViewWeight` 推到 100%
+- 不能丢的是**真实阅读**：当天第二次认真读几分钟是真实学习行为，丢掉它会逼用户「过会儿再来一遍」才能看到水位变化
+
+**三处同口径**：去重窗口、日聚合桶、曝光去重都按「一天」切分，语义一致。
+
+**去重的原子性**：「判定 + 自增」在同一条 SQL 内用 `CASE` 表达式完成，不存在读写之间的竞态。
+
+### 2.7 邻居预热：第四类证据
+
+读一个页面时，与它相邻的页面（出链 ∪ 入链，一跳、去重）会获得一次「上下文预热」。
+
+**规则收得很紧**：
+
+| 规则 | 说明 |
+|---|---|
+| 只按阅读时间折算 | 扫一眼几秒的 20% 在分数上约等于零，只会让邻居停在最低档 10% |
+| 只传一跳 | 不做多跳传播，避免归因失控 |
+| 按天记账 | 与浏览证据同构，可逐日衰减并参与冷端折叠 |
+
+**参数**：`SpreadFactor = 0.2`（邻居拿到阅读时长的 20%）、`SpreadCap = 6`（封顶在熟悉档中段 50%）。折算方式为 `SpreadFactor × 阅读秒数 × DurationWeight`，即 **1 分预热 = 300 秒来源页阅读**；一次顶格阅读（300 秒）给每个邻居 1.0 分。
+
+**两条硬边界**：
+
+1. **预热不计入饱和判定**——100% 仍然只能由自己的引用、浏览、点赞证据达成，预热最多把节点推到 90%
+2. **单靠预热上限 50%**——掌握档（≥70）只能由自己的证据产生
+
+量级参考：邻居当天被认真读 2 次到 20%、4 次到 40%、6 次及以上封顶在 50%。这样「稍微涨一点」不会退化成「看别人读就等于自己学会」。
+
+> **一处刻意之举**：原方案曾写「涟漪永不写回状态」。我们把它改为**以弱证据形式写回水位**——读一个页面会让它的一跳邻居获得本次阅读时长的 20%。目的是让「周围在读什么」也能温和地影响个人知识地图，而不是只在视觉上闪一下。量级与边界由上述两条硬边界钉死。
+
+### 2.8 反馈循环去偏：三条防线
+
+现有检索重排（`PluginMemoryAffinity`）会让「过去引用过的文档」更容易被再次检索、再次被引用。若同时把引用次数解释为状态，就会形成「**越被推荐 → 越被引用 → 越像熟悉 → 越被推荐**」的自我强化。因此守住三条边界：
+
+1. **状态只统计强行为**，不统计因个性化加权进入候选集的内容
+2. **状态模型只用于呈现与引导**，不反向增强检索加权——现有 `affinityFactor` 保持「小幅、封顶」
+3. **引用信号设上限**：同一回答同一文档只记一次；引用证据在少量不同会话后快速饱和
+
+同一回答的「引用」与「点赞」不是两份独立多样性证据——引用提供「该文档参与回答」的基础关联，点赞为这一次关联增加正向确认；真正有辨识力的强化来自**不同问题、不同时间的重复正反馈**，或用户进一步打开相关 Wiki 页面。
+
+### 2.9 证据集抽象：为扩展留出结构
+
+水位计算函数接收一个「证据集」，每类信号独立存储、独立写入：
+
+```
+Evidence = {
+    引用:  { citations, last_cited_at }
+    浏览:  { views, duration, last_viewed_at, 分日切片 }
+    点赞:  { like_credit, last_liked_at }
+    预热:  { 分日切片 }
+    // 未来扩展：兴趣、复习 / 自测 —— 各自独立表 + 独立写入，不动既有骨架
+}
+```
+
+新增一类信号只需扩展证据集，**不破坏既有表结构与分档函数**。
+
+---
+
+## 三、设计取向：为什么这样设计
+
+### 3.1 正向激励优先
+
+这套设计的首要目标**不是精确度量**，而是**产生正向激励**——让用户愿意持续打开知识地图。由此确定两条刻意为之的取向：
+
+**① 达成门槛偏低**
+
+「掌握」档（水位 ≥ 70）在**同一天内累计约 10 分钟有效阅读**即可达到；多次轻量回访也足以稳定上涨。宁可让反馈来得容易，也不把正反馈推迟到用户失去耐心之后。
+
+**② 饱和不回退**
+
+证据达到饱和阈值后水位恒为 100%，不因一段时间未访问而掉档——「学过的不会因为我忙了几天就消失」，避免让「回来看看」变成一次负反馈体验。
+
+**这两条都是为了让用户更喜欢这套设计**：金色水位本身就是激励物，因此它表达的是「**你做过什么**」，而不是「**你现在还剩多少**」。
+
+其代价是水位偏乐观、不能当作精确的认知评估——这与第 2.1 节的语义边界声明一致：它是**行为证据的饱和程度**，不是认知能力评分。我们选择用一条明确的边界声明来承载这个代价，而不是把它藏起来。
+
+### 3.2 克制的边界
+
+- **命名克制**：「接触 / 熟悉 / 掌握」表达的是低 / 中 / 高证据活跃，避免让用户产生「系统在给我打分」的观感
+- **引导克制**：Wiki 页面的链接关系不一定是严格的先修关系，因此只作「相邻关系」呈现，**不赋予「你该先学这个」的语义**；没有合适候选就不推荐，不强行凑数
+- **不越权**：状态不反向影响检索排序——引导是辅助层，不干预主流程
+
+---
+
+## 四、工程完成度
+
+### 4.1 数据层：六张专用账本
+
+> 六张账本与既有 `memory_doc_affinity`（供重排使用）**完全解耦**：状态只读专用账本，删除画像只清专用数据。
+
+| 表 | 用途 |
+|---|---|
+| `memory_citations` | 引用事件（与重排用的 `memory_doc_affinity` 双写但**解耦**） |
+| `memory_page_views` | 页面浏览（次数 + 累计时长 + 最近时间） |
+| `memory_answer_likes` | 回答点赞（含分摊快照，可精确回滚） |
+| `memory_guide_exposures` | 引导曝光（展示 / 点击 / 有效浏览三段 + 位次 + 策略） |
+| `memory_mastery_daily` | 日聚合行为桶（支撑时间切分回放与逐日衰减） |
+| `memory_spread_views` | 邻居预热（按天） |
+
+**迁移双端同步**：PostgreSQL `000093`~`000096`，SQLite Lite `000014`~`000017`，共 **8 组、16 个文件**。桌面版无需额外部署即可运行。
+
+**写入幂等**：所有账本沿用既有 `scoped()` + `OnConflict` + 原子累加写法，重试安全、并发安全。
+
+**日聚合桶的存在目的**：按「用户 × 节点 × 事件类型 × 日期」维护一份日聚合行为桶——它**同时**是实时水位计算的输入（逐日衰减）与离线回放的输入（时间切分）。轻量于全量事件日志，仍能支撑衰减、时间切分、隐私删除与离线比较。
+
+### 4.2 服务层：纯函数 + 四算法职责
+
+| 模块 | 职责 |
+|---|---|
+| `level.go`（247 行） | **证据集 → 十档水位**：确定性纯函数，含分信号 / 分日衰减、下限、饱和单向、预热折算 |
+| `allocate.go`（60 行） | **点赞分摊**：次线性封顶 + 位置衰减 + 快照回滚 |
+| `boundary.go`（139 行） | **PPR 边界识别**：个性化 PageRank，输出边界候选与分数 |
+| `service.go`（438 行） | **证据聚合**：四类账本 → 证据集，含跨页面投影与冷端折叠 |
+| `config.go`（103 行） | **参数集中定义**：所有阈值、权重、窗口、上限 |
+
+**可回放性是刻意的设计目标**：水位计算不依赖任何隐藏状态，给定证据集与时间点就能重算出当时的水位，因此「时间切分回放」不需要重跑历史代码。
+
+### 4.3 接口层：8 个端点
+
+全部挂在 `/api/v1/memory` 下，**路径中不含 subject id**（主体来自调用者的 principal）：
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| `POST` | `/memory/page-view` | 上报有效浏览，返回该节点最新水位供即时刷新 |
+| `POST` | `/memory/answer-like` | 点赞回答（服务端按 session + message 读取真实引用） |
+| `DELETE` | `/memory/answer-like/:message_id` | 取消点赞 |
+| `POST` | `/memory/exposure` | 记录边界候选曝光（含位次） |
+| `POST` | `/memory/exposure/click` | 记录边界候选点击 |
+| `GET` | `/memory/mastery?kb_id=` | 查看个人知识画像（节点明细） |
+| `GET` | `/memory/mastery/export?kb_id=` | 导出 HTML 报告 |
+| `DELETE` | `/memory/mastery` | 删除个人知识画像 |
+
+图接口 `GET /knowledgebase/:id/wiki/graph?mastery=true` 在节点上附带水位、边界标记与最近活跃时间。
+
+**写入口的服务端校验**：浏览上报与点赞都会在服务端验证事件确实映射到调用者可见的真实对象（他浏览过的 Wiki 页面、他拥有的消息），**不信任客户端提交的文档列表**——保证「行为证据可审计」这一前提不被伪造的 payload 绕过。
+
+### 4.4 前端：可视化与交互
+
+| 模块 | 内容 |
+|---|---|
+| 视图切换 | 「知识引导」开关，状态持久化到 localStorage（避免每次进 Wiki 都要重新关一次） |
+| 水位球渲染 | 几何自洽的水体路径（水面两端取在水面与圆的交点、底边是圆的下弧），**不依赖 `clip-path` 裁剪**，任意缩放都不会溢出球体 |
+| 水波动效 | 正弦波逐帧推进相位，流速与球半径成比例（`WATER_FLOW_SECONDS = 4`）；同时播放上限 `WATER_ANIM_MAX = 24` 个节点；无节点参与时自动停止；尊重 `prefers-reduced-motion` |
+| 档位筛选 | 接触 / 熟悉 / 掌握 / 全部，前端本地过滤 |
+| 下一步推荐 | 抽屉内「继续探索 · 建议先看」1~3 项，点击直达 |
+| 个人画像 | 四档概览 + 节点明细（水位降序）+ 导出 + 删除 |
+| 流量控制 | 图表按类型过滤、ego 视图、Bloom / Grow Frontier |
+
+> 上述界面的实际效果见文首「成果速览」章节。
+
+**水位球渲染的一处硬修复**：水体的旧实现是「宽 4r 的超宽波浪 + `clip-path` 裁剪」——波浪要横向滚动无缝循环，所以铺得比球宽，完全依赖裁剪。但 CSS transform 动画会把元素提升为合成层，**可能绕过 SVG 裁剪**，表现为水流出球外。新实现改为**几何自洽的封闭水体路径**：水面两端落在圆上、底边画成圆的下弧，波形改用**端点为 0 的包络正弦**并在弦内平移相位。这样水体在几何上不可能超出容器，裁剪彻底不再需要。
+
+### 4.5 测试：44 个测试函数
+
+| 层次 | 覆盖内容 |
+|---|---|
+| 水位计算 | 无证据、引用封顶、浏览档位、多信号达档、衰减、分信号独立衰减、饱和单向、衰减下限、十档对齐（22 个） |
+| 邻居预热 | 自身跳过、去重、累加、批量、封顶、不计入饱和、冷端折叠等价性（5 个） |
+| 点赞分摊 | 单来源、次线性封顶、位置衰减、去重、空输入（5 个） |
+| PPR 边界 | 冷启动、低证据邻居命中、已熟悉节点排除（3 个） |
+| 同页去重 | 次数折叠、时长保留、跨用户隔离、日桶一致性（5 个） |
+| 日桶读取 | 分日读取、折叠规则、冷端切分（4 个） |
+
+**回归测试的定位价值**：例如去重测试会断言「6 次重复浏览 → 次数为 1、时长为 30」，若有人移除去重逻辑，`view_count` 会变成 6 而测试立刻失败。
+
+### 4.6 参数治理
+
+- 所有阈值、权重、窗口、上限**全部集中定义**，业务代码中不写死
+- **双侧同步**：后端与前端常量在注释中互相注明
+- 参数之间标注**耦合关系**（见 2.5），避免单侧调整破坏既有性质
+
+---
+
+## 五、有效性验证方式
+
+**验证目标不是「证明系统准确知道用户掌握了什么」，而是「这个用户状态模型是否具有预测与引导价值」。**
+
+### 5.1 离线回放（时间切分）—— 首选方案
+
+```
+输入：memory_mastery_daily      用户 × 节点 × 事件类型 × 日期
+     memory_guide_exposures    展示 / 点击 / 有效浏览（含位次）
+
+处理：按日期切分
+     前一段 → 重建证据集 → 计算水位与知识边界
+     后一段 → 检验用户是否真的继续访问这些节点
+
+输出：下一次访问命中率 / Top-K 边界节点点击率 / 重复访问率 / 沉寂节点复访率
+基线：本方案 vs 现有 Familiar 二值高亮 vs 随机 vs 按链接数排序
+```
+
+**为什么可行**：水位计算是纯函数、证据集可从日聚合桶完整重建、曝光日志已记录展示与点击——**这条验证路径所需的全部数据基础，在实现时就已经准备好**（日聚合桶的存在目的就是它）。
+
+### 5.2 小规模试用
+
+让用户完成同样的知识探索任务，对比普通 Wiki 图与个人知识地图，观察：是否更快找到相关页面、边界推荐节点的点击比例、是否继续探索、状态是否准确、沉寂提示是否有帮助、地图是否变复杂或有压力。
+
+### 5.3 负面效果评估
+
+作为 WeKnora 的附加功能，重点评估：是否打扰问答主流程、是否让地图变复杂、是否产生错误掌握判断、是否让用户感觉被评估、是否让用户关闭该功能。若反馈提示过多，则降低自动判断强度。
+
+**开关本身就是这项评估的制度化回答**：引导视图默认关闭、一键切换、状态可记住，把「正常浏览」与「学习视角」两种诉求隔离开。
+
+### 5.4 已就位的数据基础
+
+| 基础 | 作用 |
+|---|---|
+| 日聚合行为桶 | 时间切分回放的输入；同时是实时水位计算的输入（逐日衰减） |
+| 曝光三段日志 | 回答「推荐是否真的更有效」「用户没点是因为不感兴趣还是没看到」 |
+| 纯函数水位计算 | 任意时点可重算，无需重跑历史代码 |
+| 引导曝光策略字段 | 预留 `strategy`（`ppr_boundary` / `faded_review`），为后续策略学习留口 |
+
+### 5.5 已知边界（如实声明）
+
+写清楚是为了避免误用：
+
+1. **引用与点赞尚未按天切片**——日聚合桶已在写入这两类事件，但评分仍读汇总行加单一最近时间戳，「今天一次引用或点赞给历史整体保鲜」在这两个信号上仍然存在（浏览与预热已切片，不受影响）
+2. **饱和是单向的，且浏览次数不封顶**——「连续 6 天各来一次」即可让节点永久停在 100%，而「认真读 5 分钟、30 天没来」会回落到 30% 附近。这是 3.1「正向激励优先、满了不忘」的既定取向，代价是长期注水比短期认真更划算
+3. **参数尚未经数据校准**——`HalfLifeDays = 30`、`DecayFloor = 0.35`、`SpreadFactor = 0.2`、`SpreadCap = 6` 与档位阈值 `1 / 4 / 8 / 12` 都是推导值（满足 2.5 的一致性约束），没有线上数据支撑；`Config` 目前是代码内默认值，调整需改代码
+4. **时间切分回放尚未接通**——浏览与预热维度已作为实时计算输入，但引用与点赞维度目前只写不读，回放任务本身（离线批处理、指标输出、基线对比）还没有实现
+
+---
+
+## 六、数据管理与用户控制
+
+| 能力 | 接口 | 语义 |
+|---|---|---|
+| **查看** | `GET /memory/mastery?kb_id=` | 返回该知识库下当前用户的节点明细，可看到水位由哪些行为构成 |
+| **导出** | `GET /memory/mastery/export?kb_id=` | 自包含单页 HTML（无外部依赖、可离线打开），按页面类型 → 档位分组，含四档概览与分布条 |
+| **删除** | `DELETE /memory/mastery` | 清空当前用户的知识画像，二次确认 |
+| **关闭** | 前端开关 | 仅停止显示，不删除数据——与「删除」是两个独立动作 |
+
+**删除的边界（严格限定）**：
+
+- 只清空六类**专用数据**（引用、浏览、点赞、曝光、日聚合桶、预热）
+- **不触碰** `memory_doc_affinity`：现有检索个性化重排照常工作
+- **不触碰**普通长期记忆
+- **不影响**知识库内容、Wiki 页面与其他用户
+
+**隔离**：所有画像读写都经过 memory 的 `ResolveScope` / `scoped()`，按「租户 + 用户」隔离；无 principal（如 API 调用）时自动跳过。同租户其他用户不可见。
+
+> 「查看」与「导出」的界面效果见文首「成果速览」章节。
+
+---
+
+## 七、交付物对照
+
+| 课题要求交付物 | 我们的交付 |
+|---|---|
+| 设计说明 | 《课题四_知识网络与引导式学习_重构方案》17 章 |
+| 可运行原型 | 后端 8 接口 + 6 账本 + 双端迁移；前端完整可视化与交互 |
+| 验证报告 | **验证方案已完整设计、数据基础已就位**（第五章）；回放脚本按方案限定为「只读回放 + 指标输出」 |
+| 数据管理 | 租户隔离 + 查看 / 导出 / 删除 / 关闭 |
+
+---
+
+## 八、附录：可调参数总表
+
+**后端**（`internal/application/service/mastery/config.go`）
+
+| 常量 | 值 | 含义 |
+|---|---|---|
+| `CitationCap` / `CitationWeight` | 3 / 1 | 引用封顶与权重 |
+| `ViewWeight` / `DurationWeight` | 2 / `1/60` | 浏览次数权重 / 每秒时长权重 |
+| `LikeWeight` | 2 | 点赞权重（分摊后计入） |
+| `SpreadFactor` / `SpreadCap` | 0.2 / 6 | 邻居预热折扣 / 上限 |
+| `HalfLifeDays` / `DecayFloor` | 30 / 0.35 | 衰减半衰期 / 下限 |
+| `FreshnessDays` | 7 | 最近活跃窗口（仅驱动水波，不影响水位） |
+| `TouchScore` / `FamiliarScore` | 1 / 4 | 接触 / 熟悉档起点 |
+| `MasteredScore` / `SatScore` | 8 / 12 | 掌握档起点 / 饱和阈值 |
+| `MasteryMaxPageViewSeconds` | 300 | 单次浏览时长封顶（服务端二次钳制） |
+| 同页去重 | 按天 | `types.MasteryPageViewDayStart` |
+
+**前端**（`frontend/src/views/knowledge/wiki/WikiBrowser.vue`）
+
+| 常量 | 值 | 含义 |
+|---|---|---|
+| `PAGE_VIEW_MIN_SECONDS` | 5 | 低于视为误点，不上报 |
+| `PAGE_VIEW_MAX_SECONDS` | 300 | 单次累计上限 |
+| `WATER_FLOW_SECONDS` | 4 | 水波横移一个球径所需秒数（越大越慢） |
+| `WATER_ANIM_MAX` | 24 | 同时播放水波的节点数上限 |
