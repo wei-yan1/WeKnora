@@ -4,22 +4,53 @@
 
 > **已与上游同步**：本分支已合并上游 `Tencent/WeKnora` 的 `main` 分支共 203 个提交（同步点 `85b76d1a`），插件框架构建在同步后的代码底座之上，未与上游脱节。
 
-## 实测验证
+## 目录
+
+- **[一、实测验证](#一实测验证)**
+  - [1.1 五类扩展点端到端实测](#11-五类扩展点端到端实测)
+  - [1.2 Wiki 模式：完整用户链路](#12-wiki-模式完整用户链路)
+- **[二、验收达成与关键难题解法](#二验收达成与关键难题解法)**
+- **[三、整体架构](#三整体架构)**
+- **[四、插件生命周期：从磁盘到运行中的服务](#四插件生命周期从磁盘上的文件夹到运行中的服务)**
+- **[五、插件部署目录结构](#五插件部署目录结构)**
+- **[六、真实可用的插件示例（独立插件仓库）](#六真实可用的插件示例独立插件仓库)**
+- **[七、插件框架治理能力](#七插件框架治理能力面向生产)**
+- **[八、五个扩展点插件制作文档](#八五个扩展点插件制作文档)**
+- **[九、已知边界](#九已知边界)**
+- **[十、架构流程详解：四层如何协作](#十架构流程详解四层如何自上而下协作)**
+- **[十一、运行效果截图](#十一运行效果截图)**
+- **[十二、实机测试演示视频](#十二实机测试演示视频)**
+- **[十三、运行与测试命令](#十三运行与测试命令)**
+
+## 一、实测验证
+
+### 1.1 五类扩展点端到端实测
 
 本课题已在 **Docker 部署**（生产态 OCI 沙箱运行时）与**快速开发模式**（开发态进程级运行时）两种运行方式下，完成了五类扩展点插件的端到端实测：
 
-- **数据源（DataSource）**：以插件方式上传 GitHub、钉钉（DingTalk）等来源的文件，验证了增量同步与 Wiki 模式；
+- **数据源（DataSource）**：LocalDir、GitHub、钉钉（DingTalk）**三个数据源插件均已实现增量同步**（源端仅变更一个文件时只重新处理该文件），并验证了 Wiki 模式；
 - **解析器（Parser）与检索器（Retriever）**：分别采用插件化的 BuiltinB 与 Milvux，完成文档解析与向量检索；
 - **网络搜索（Web Search）**：配置 Tavily 实现联网搜索；
 - **模型（Model）**：接入 DeepSeek 的深度思考能力提供问答。
 
 以上五类插件的完整实现位于独立仓库 [WeKnora-plugin](https://github.com/wei-yan1/WeKnora-plugin)，以独立仓库方式开发、无需改动主仓代码即可装载——这正是「扩展点插件化」的落地形态。
 
-五类扩展点均已端到端跑通，实测证据见「验收达成与关键难题解法」与第九节运行截图，实机测试过程见文末「实机测试演示视频」。安全框架另在 Docker 部署下通过 **19 项端到端控制点验收**（权限分离 / 强隔离沙箱 / 断网实测 / Socket 移交 / 信任分级持久化 / 全链路连通），详见「端到端验收实测」。
+五类扩展点均已端到端跑通，实测证据见「验收达成与关键难题解法」与第十一节运行截图，实机测试过程见文末「实机测试演示视频」。安全框架另在 Docker 部署下完成 **19 项核心安全控制验收**（权限分离 / 强隔离沙箱 / 断网实测 / Socket 移交 / 信任分级持久化 / 全链路连通），并有 4 项网络策略与审计验证记录，共 23 个检查点，详见「端到端验收实测」。
+
+### 1.2 Wiki 模式：完整用户链路
+
+在 Docker 部署下，我们还以 Wiki 知识库为载体走通了一条真实用户会走的链路：
+
+- **上传与接入**：经插件化数据源，把本地目录 / GitHub / 钉钉等来源的文件接入知识库；
+- **Wiki 页面**：在 Wiki 中浏览、组织与维护知识内容；
+- **提问与检索**：直接对知识库提问、检索，由插件化的模型与检索引擎给出回答；
+- **联网搜索**：用网络搜索插件补充知识库之外的信息。
+
+这组操作证明：五类扩展点不只是各自跑通，也承接了从上传、浏览到问答、搜索的真实使用场景。
 
 ---
 
-## 验收达成与关键难题解法
+## 二、验收达成与关键难题解法
 
 课题一设定了 4 条验收标准。下面先给出「验收标准 → 实现机制 → 实测证据」的逐条对照，再集中说明实现过程中攻克的关键难题及其解法。
 
@@ -27,10 +58,10 @@
 
 | # | 验收标准 | 实现机制 | 实测证据 | 详见 |
 |---|---|---|---|---|
-| 1 | 主仓之外的独立仓库插件，免改主仓代码即可装载，并完成一次完整数据同步 | 五类扩展点统一为「Manifest 声明 + 进程外 gRPC」；插件由五个 `WEKNORA_PLUGIN_DIR_*` 目录驱动发现，经 `ExtensionAdapterRegistry` 动态接线，业务侧既有注册表以 factory 模式挂入，**业务路径一行未改** | GitHub、钉钉、LocalDir 三个数据源插件以独立仓库 [WeKnora-plugin](https://github.com/wei-yan1/WeKnora-plugin) 维护，主仓零改动完成完整同步 | 第二、三、四节 |
-| 2 | 插件声明不联网时，运行期实际无法出站，尝试联网被拦截并记录 | 默认拒绝（默认 `offline`，需管理员显式授权）+ 信任只能收窄 manifest → 容器 `--network none` 无网卡 → 唯一出口是只读挂载的 egress 代理，在网络层校验白名单并审计；即便绕过 SDK 也在网络层兜底 | 19 项端到端实测全通过（含断网实测、白名单内放行/外拦截、SSRF 防护），每次放行与拦截均有审计留痕 | 第二、五、八节 |
-| 3 | 增量同步正确：源端仅变更一个文件时，只有该文件被重新处理 | cursor 契约（插件解释语义、宿主原样存取）+ Outbox 模式（先落库再投递）+ 双层分布式锁（防重复触发、防并发拉取） | GitHub、钉钉均验证「仅变更一个文件 → 只有该文件被重新处理」 | 第二、五节 |
-| 4 | 他人仅依据文档即可独立实现一个可运行的最简插件 | 五份独立完整文档（每扩展点一份）+ 协议级 conformance 自检入口 + 可复制模板目录 | 独立仓库五类插件均依据对应文档实现，作者无需阅读主仓源码 | 第六、七节 |
+| 1 | 主仓之外的独立仓库插件，免改主仓代码即可装载，并完成一次完整数据同步 | 五类扩展点统一为「Manifest 声明 + 进程外 gRPC」；插件由五个 `WEKNORA_PLUGIN_DIR_*` 目录驱动发现，经 `ExtensionAdapterRegistry` 动态接线，业务侧既有注册表以 factory 模式挂入，**已有业务接口与主要调用流程保持兼容** | GitHub、钉钉、LocalDir 三个数据源插件以独立仓库 [WeKnora-plugin](https://github.com/wei-yan1/WeKnora-plugin) 维护，新增插件无需修改主仓代码即完成完整同步 | 第四、五、六节 |
+| 2 | 插件声明不联网时，运行期实际无法出站，尝试联网被拦截并记录 | 默认拒绝（默认 `offline`，需管理员显式授权）+ 信任只能收窄 manifest → 容器 `--network none` 无网卡 → 唯一出口是只读挂载的 egress 代理，在网络层校验白名单并审计；即便绕过 SDK 也在网络层兜底 | 19 项核心安全控制实测通过，另有 4 项网络策略与审计验证记录（断网实测、白名单内放行/外拦截、SSRF 防护），共 23 个检查点；经 SDK Guard 或受控 egress 代理的请求均产生审计记录 | 第四、七、十节 |
+| 3 | 增量同步正确：源端仅变更一个文件时，只有该文件被重新处理 | cursor 契约（插件解释语义、宿主原样存取）+ Outbox 模式（先落库再投递）+ 双层分布式锁（防重复触发、防并发拉取） | LocalDir、GitHub、钉钉**三个数据源插件均已实现并验证**「仅变更一个文件 → 只有该文件被重新处理」 | 第四、七节 |
+| 4 | 他人仅依据文档即可独立实现一个可运行的最简插件 | 五份独立完整文档（每扩展点一份）；其中四类提供 SDK conformance 自检入口，Retriever 因具有 Store Session 状态，提供手工一致性验证清单；另有可复制模板目录 | 独立仓库五类插件均依据对应文档实现，作者无需阅读主仓源码 | 第八、九节 |
 
 ### 关键难题与解法
 
@@ -40,7 +71,7 @@
 
 - 编译期方案（Go 原生插件或注册表合并）要求插件与主仓**同版本编译、同进程运行**，既无法满足「独立仓库、免改主仓」，也无法提供安全隔离；
 - 进程间 gRPC 让插件成为**独立进程或容器**：独立编译、独立发布，只要实现协议即可用任意语言编写，并可叠加隔离与资源边界；
-- 代价是协议与生命周期的复杂度上升。为此把复杂度**全部收敛进框架**，抽象为四层：PluginManager（控制面）→ Runtime（运行形态）→ Adapter / gRPC Proxy（适配）→ Type-specific Registry（业务）。**新增第六类扩展点只需一个 Adapter + 一份 SDK 入口 + 一份文档**，五类业务路径保持不变。
+- 代价是协议与生命周期的复杂度上升。为此把复杂度**收敛进框架**，抽象为四层：PluginManager（控制面）→ Runtime（运行形态）→ Adapter / gRPC Proxy（适配）→ Type-specific Registry（业务）。新增扩展类型时可复用统一控制面与 Runtime，增量主要集中在业务协议、Adapter、SDK 入口与开发文档。
 
 #### 难题二：业务容器不能持有 docker.sock，如何安全地启动插件容器？
 
@@ -73,9 +104,9 @@
 3. **运行期硬隔离**：容器以 `--network none` 启动，插件**没有网卡**，`net.Dial` 在操作系统层即失败；唯一出口是 per-plugin egress 代理 socket，**只读挂载**（能 connect、不能替换），代理在网络层再次校验：`none` 直接拒绝，`allowlist` 仅放行白名单域名（支持通配），并先 DNS 解析、再按解析出的 IP 拨号，**防 DNS rebinding TOCTOU**；
 4. **隔离等级与部署形态绑定**：`isolated` 依赖 OCI 容器硬隔离，仅在 **Docker 部署**下可用；快速开发模式采用进程级运行，最高只能提供 `trusted` 级别的协作式软约束（依赖 SDK 的 `GuardedHTTPClient`）——这也是 `trusted` 仅适用于受信任插件的原因。
 
-每一次放行与拦截都写审计（插件 ID + 目的地址 + 结果）；信任级别由管理员在统一控制面集中配置，插件与调用方都无法自行提升——多租户环境下，网络权限边界始终掌握在管理员手中。
+经 SDK Guard 或受控 egress 代理的请求均产生审计记录（插件 ID + 目的地址 + 结果）；`network:none` 下绕过 SDK 的裸网络调用仍会被操作系统物理阻断，但该路径不经过代理，不保证逐请求留痕。信任级别由管理员在统一控制面集中配置，插件与调用方都无法自行提升——多租户环境下，网络权限边界始终掌握在管理员手中。
 
-### 端到端验收实测（19 项全通过）
+### 端到端验收实测（19 项核心控制 + 4 项网络策略，共 23 个检查点）
 
 在 Docker 部署环境下，使用自动化验收脚本对安全框架的关键控制点逐项实测（手段为 `docker inspect` + `psql` + 审计日志 + 管理 API），覆盖 6 组控制点：
 
@@ -88,9 +119,11 @@
 | ⑤ 信任分级持久化 | 信任等级落库 `system_settings`；`offline / trusted / isolated` 三档齐备；重启不丢 | `psql` 查询 |
 | ⑥ 端到端连通 | isolated 插件经 agent 编排上线，`state=running`——宿主 ↔ agent ↔ 容器 ↔ socket 全链路贯通 | 管理 API |
 
-**结果：19 项全部 PASS，0 项 FAIL。**
+**结果：19 项核心安全控制全部 PASS，0 项 FAIL。**
 
-网络策略另有 4 项实测（第 20–23 项）：
+上面这组检查已固化为可复跑脚本 [`scripts/plugin-security-acceptance.sh`](scripts/plugin-security-acceptance.sh)（含 egress 审计断言），运行方式见第十三节。
+
+另有 4 项网络策略与审计验证记录（第 20–23 项）——脚本对未观察到的 egress 日志以 `info` 提示而非判 FAIL，故记为验证记录：
 
 | 场景 | 审计记录（runtime-agent 日志） |
 |---|---|
@@ -115,11 +148,11 @@
   reason=destination is not in manifest allowlist
 ```
 
-这组实测直接支撑验收标准第 2 条——**「不联网声明在运行期被强制执行，且每一次放行与拦截都可审计」**：不仅有配置层面的信任收敛，更有运行期的物理断网与网络层拦截证据。
+这组实测直接支撑验收标准第 2 条——**「不联网声明在运行期被强制执行，经过受控通道的请求可审计」**：不仅有配置层面的信任收敛，更有运行期的物理断网与网络层拦截证据。需要说明的是：`network:none` 下绕过 SDK 的裸网络调用会被操作系统强制阻断（③ 断网实测即是证明），但该路径不经过 egress 代理，因此不保证逐请求留痕。
 
 ---
 
-## 一、整体架构
+## 三、整体架构
 
 WeKnora 的插件框架分为四层，自上而下：
 
@@ -169,15 +202,15 @@ WeKnora 的插件框架分为四层，自上而下：
 | PluginManager | 发现、校验、注册、生命周期、健康、权限、审计 | `internal/plugin/{discovery,loader,runtime,admission,security}.go` |
 | Runtime | 插件的实际运行形态（内置 / 进程 / 容器） | `internal/plugin/{builtin,process_runtime,docker_runtime}.go` |
 | Adapter / gRPC Proxy | 把统一生命周期接到五类业务注册表；内置走单例、外部走 factory | `internal/plugin/*_registration.go` + `datasource_proxy.go` |
-| Type-specific Registry | 宿主既有的五类注册表，插件注册进来后业务路径零改动 | `internal/datasource` 等 |
+| Type-specific Registry | 宿主既有的五类注册表；插件经 Adapter 接入，已有业务接口保持兼容 | `internal/datasource` 等 |
 
-**插件如何被识别**：一个插件就是一个文件夹——里面一份 `plugin.yaml`（用 `extension_type` 声明"我是哪类插件"）+ 一个编译好的二进制。宿主启动时按五个环境变量 `WEKNORA_PLUGIN_DIR_{datasource,parser,search,model,retriever}` 递归扫描对应目录，读到 `plugin.yaml` 即识别为一个插件并装载（目录结构见第三节）。**新增插件 = 新建文件夹 + 放 `plugin.yaml` 和二进制，无需改主仓代码。**
+**插件如何被识别**：一个插件就是一个文件夹——里面一份 `plugin.yaml`（用 `extension_type` 声明"我是哪类插件"）+ 一个编译好的二进制。宿主启动时按五个环境变量 `WEKNORA_PLUGIN_DIR_{datasource,parser,search,model,retriever}` 递归扫描对应目录，读到 `plugin.yaml` 即识别为一个插件并装载（目录结构见第五节）。**新增插件 = 新建文件夹 + 放 `plugin.yaml` 和二进制，无需改主仓代码。**
 
-**插件作者如何开发**：作者不必理解上面的架构或宿主代码，只需照对应扩展点的文档写 `plugin.yaml`、用 `pkg/pluginapi` SDK 填回调、编译成独立二进制。五类扩展点的文档与 SDK 入口索引见第六节；每份文档独立、完整、可盲测，末尾各带一个 conformance 自检入口（如 `RunDataSourceConformance`），作者本地即可做协议级冒烟验证。
+**插件作者如何开发**：作者不必理解上面的架构或宿主代码，只需照对应扩展点的文档写 `plugin.yaml`、用 `pkg/pluginapi` SDK 填回调、编译成独立二进制。五类扩展点的文档与 SDK 入口索引见第八节；每份文档独立、完整、可盲测——其中 DataSource / Parser / WebSearch / Model 四类提供 SDK conformance 自检入口（如 `RunDataSourceConformance`），作者本地即可做协议级冒烟验证；Retriever 因具有 Store Session 状态，改以手工一致性验证清单覆盖同类检查。
 
 ---
 
-## 二、插件生命周期：从磁盘上的文件夹到运行中的服务
+## 四、插件生命周期：从磁盘上的文件夹到运行中的服务
 
 **通俗地说**：以 GitHub 数据源插件为例——将编译好的 `weknora-plugin-github` 二进制和 `plugin.yaml` 放入插件目录，宿主下次启动（或在设置页点击"刷新插件"）时，插件会被发现、校验、注册，随后宿主把它作为子进程（或容器）拉起，通过 gRPC 握手确认身份与能力；此后知识库每一次同步 GitHub 仓库，实际执行者都是该独立进程。以下按真实代码逐阶段展开。
 
@@ -295,7 +328,7 @@ cursor 的契约由宿主与插件共同维护：**插件理解 cursor 的语义
 
 ---
 
-## 三、插件部署目录结构
+## 五、插件部署目录结构
 
 插件部署时，先建立一个总目录（例如 `D:\weknora-plugins`），再按扩展类型细分五个子目录，每个子目录对应一个环境变量：
 
@@ -312,7 +345,7 @@ D:\weknora-plugins\          ← 总目录（名称任意）
 
 ---
 
-## 四、真实可用的插件示例（独立插件仓库）
+## 六、真实可用的插件示例（独立插件仓库）
 
 插件示例与模板**不放在主仓源码中**，以独立插件仓库 [WeKnora-plugin](https://github.com/wei-yan1/WeKnora-plugin) 形式维护。开发者在不修改主仓任何代码的前提下，复制对应目录、改 `plugin.yaml` 的 `id` 和 `config_schema`，就能独立构建出一个新插件。
 
@@ -326,13 +359,13 @@ D:\weknora-plugins\          ← 总目录（名称任意）
 | **DS (DeepSeek)** | `model` | DeepSeek 聊天模型提供方（OpenAI 兼容） | `model/weknora-plugin-DS/` |
 | **Milvux** | `retriever` | Milvus 兼容的向量检索引擎（别名 Milvux，避免与内置 Milvus 引擎类型冲突） | `retriever/weknora-plugin-milvux/` |
 
-它们都验证了同一件事：**一个独立于 WeKnora 主仓的外部插件，能通过 Manifest 描述身份 / 能力 / 版本 / 配置 / 权限，由宿主发现、启动、管理，并通过进程外 gRPC 接入现有流程，且主仓零改动**。
+它们都验证了同一件事：**一个独立于 WeKnora 主仓的外部插件，能通过 Manifest 描述身份 / 能力 / 版本 / 配置 / 权限，由宿主发现、启动、管理，并通过进程外 gRPC 接入现有流程，无需修改主仓代码**。
 
 插件仓库按 `datasource/ parser/ search/ model/ retriever/` 五个扩展点子目录组织，每个插件包含完整的 `plugin.yaml` + Go 入口 + 独立 `go.mod`（用 `replace` 指向本地 WeKnora 源码以便联调；独立发布时删除该 replace）。
 
 ---
 
-## 五、插件框架治理能力（生产级）
+## 七、插件框架治理能力（面向生产）
 
 | 能力 | 实现位置 | 作用 |
 |---|---|---|
@@ -343,7 +376,7 @@ D:\weknora-plugins\          ← 总目录（名称任意）
 | **网络策略 + 受控出站** | `internal/plugin/manifest.go`（声明）+ `internal/plugin/egress_proxy.go`（容器网络层强制）+ `pkg/pluginapi/guarded_client.go`（SDK 防护） | 插件声明 `network: none` / `allowlist`；isolated 插件经 runtime-agent 的 per-plugin 出口代理强制白名单（域名+通配、SSRF 拦截、审计）；`url` 类型字段自动走 SSRF 校验 |
 | **插件生命周期** | `internal/plugin/runtime.go` | Handshake 双向能力校验 + Health 周期监督（30s / 阈值 3 次），失败自动 Restart（上限 3 次）且全程审计；Stop 先 drain 拒绝新 lease，超时强制取消 |
 | **配置校验与脱敏** | `internal/datasource/httpclient.go`（SSRF）+ `internal/types/datasource.go`（AES-256-GCM 加密凭证）+ 前端 secret 锁头输入框 | 凭证字段加密存储，前端不回显明文，敏感字段在 UI 上以锁头展示 |
-| **审计与追踪** | `internal/plugin/security.go` + `supervision_audit_test.go` + `audit_integration_test.go` | 插件装载、启动、停止、调用、网络放行/拦截、监督降级与重启等事件全部产生审计日志 |
+| **审计与追踪** | `internal/plugin/security.go` + `supervision_audit_test.go` + `audit_integration_test.go` | 网络放行/拒绝、Socket 权限移交、健康降级与自动重启产生结构化审计；业务调用通过 invocation context 与日志链路追踪 |
 
 ### 数据源同步的双层分布式锁（生产化）
 
@@ -354,7 +387,7 @@ D:\weknora-plugins\          ← 总目录（名称任意）
 | `trigger-lock`（触发锁） | 15s / 5s | 检查 pending/running → 创建 SyncLog → Asynq 入队 | 防止同一数据源被重复触发、重复入队 |
 | `execution-lock`（执行锁） | 45s / 15s | connector 实际拉取执行 | 防止同一数据源并发拉取 |
 
-生产级语义（不是简单 `SETNX`）：
+关键语义（不是简单 `SETNX`）：
 
 - **token-owned**：每次获取生成随机 token，续租与释放都校验 token，只有持有者能释放；锁 key 带 `{dataSourceID}` hash tag，天然支持 Redis Cluster；
 - **续租失败即取消**：后台 `renewLoop` 每 15s 续租，一旦续租失败立即 `cancel` 同步上下文，让 Worker 感知"锁已丢失"并停止，避免两实例同时写；
@@ -365,7 +398,7 @@ D:\weknora-plugins\          ← 总目录（名称任意）
 
 ---
 
-## 六、五个扩展点插件制作文档
+## 八、五个扩展点插件制作文档
 
 每个扩展点都有独立、完整的"独立开发"指南，开发者只依据文档就能盲测实现一个新插件，无需阅读主仓源码。
 
@@ -381,18 +414,18 @@ D:\weknora-plugins\          ← 总目录（名称任意）
 
 ---
 
-## 七、已知边界
+## 九、已知边界
 
 - **检索引擎的高级能力**：`copy_indices` 等能力目前为可选 capability，尚未提升为必选；
-- **部分扩展点的 UI 与流式能力**：模型管理的"plugin source"选项、检索引擎的 schema / credential 配置界面尚未接入前端；解析的流式化尚未实现；
+- **流式能力**：解析的流式化尚未实现（数据源、模型已支持流式）；
 - **隔离等级**：操作系统级硬隔离仅由 Docker/OCI 容器提供；进程形态（含快速开发模式）最高只能提供协作式软约束；
 - **生产部署待验证项**：非 root 运行的插件容器访问 egress socket 的兼容性、以及插件容器 UID/GID 的 manifest 声明，尚未纳入验证范围。
 
 ---
 
-## 八、架构流程详解：四层如何自上而下协作
+## 十、架构流程详解：四层如何自上而下协作
 
-本节按四层架构自上而下逐层展开，每层说明对应的源码模块、职责与关键设计。第二节从时间线视角描述插件的生命周期，本节则按模块拆解各层的职责与实现；一个请求如何贯穿四层，在本节末尾的「一张请求的完整旅程」中串联。
+本节按四层架构自上而下逐层展开，每层说明对应的源码模块、职责与关键设计。第四节从时间线视角描述插件的生命周期，本节则按模块拆解各层的职责与实现；一个请求如何贯穿四层，在本节末尾的「一张请求的完整旅程」中串联。
 
 ---
 
@@ -737,7 +770,7 @@ OpenSession(config):
 
 ### 第四层：Type-specific Registry —— 落到宿主既有业务
 
-最底层是五类业务注册表，**插件框架零改动**这些已有代码：
+最底层是五类业务注册表。插件框架通过 Adapter 接入这些既有注册表，**保持已有业务接口兼容**：
 
 | Registry | 文件 | 承载的扩展点 | 关键类型 |
 |---|---|---|---|
@@ -747,7 +780,7 @@ OpenSession(config):
 | `ModelProviderRegistry` | 模型模块 | 模型 | `Chat` / `Embed` / `Rerank` / `VLM` / `Transcribe` |
 | `RetrieverProviderRegistry` | `internal/plugin/retriever_registration.go` | 检索引擎 | `RetrieverProvider` + `RetrieverBackend` |
 
-注册表以下，宿主既有的同步、解析、检索、模型调用流程**完全不变**。插件框架的"统一"价值就在于：五类业务共用同一套 PluginManager + Runtime + Adapter + Proxy，新增第六类扩展点只需写一个新 Adapter + 一份 SDK 入口 + 一份制作文档。
+注册表以下，宿主既有的同步、解析、检索、模型调用流程**沿用原有实现**。插件框架的「统一」价值在于：五类业务共用同一套 PluginManager + Runtime + Adapter + Proxy；新增扩展类型时，增量主要集中在业务协议、Adapter、SDK 入口与开发文档。
 
 ---
 
@@ -800,30 +833,83 @@ OpenSession(config):
 
 ---
 
-## 九、运行效果截图
+## 十一、运行效果截图
 
-以下截图来自外部数据源插件的实际运行，展示了「插件类型动态出现在创建列表 → 配置 → 同步 → 文档进入知识库」的完整链路：
+以下截图来自实际运行，覆盖「统一控制面 → 插件类型出现在创建列表 → 同步 → 文档进入知识库 → 插件化模型」链路：
+
+![插件服务：在统一控制面中管理全部插件（状态 / 运行方式 / 刷新）。图中 TARily (Docker Test) 显示「失败」是预期行为——该实例仅支持 Docker 部署，未部署时宿主如实标记，恰好验证了健康监督能准确反映插件的真实状态](docs/images/plugin-management-console.png)
 
 ![数据源类型选择：外部插件类型自动出现在创建列表](docs/images/datasource-types-selection.png)
 
 ![Local Directory 插件：增量同步成功](docs/images/datasource-localdir-sync.png)
 
-![GitHub 插件：同步成功（22 个文档，6 个失败提示）](docs/images/datasource-github-sync.png)
-
 ![DingTalk 插件：增量同步成功](docs/images/datasource-dingtalk-sync.png)
 
-![GitHub 同步进入知识库的文档列表](docs/images/knowledge-github-docs.png)
+![模型配置：模型来源选择「插件」，接入 DeepSeek (DS)](docs/images/model-plugin-source.png)
 
 ---
 
-## 十、实机测试演示视频
+## 十二、实机测试演示视频
 
-以下是五类扩展点插件在 Docker 部署与快速开发模式下的实机测试录像（共 7 段）：
+以下是五类扩展点插件在 Docker 部署与快速开发模式下的实机测试录像（共 8 段）。视频已上传至 GitHub，可直接在线播放；下表为各段内容与时长索引：
 
-- `fc4e4a85_v2_p1a.mp4`
-- `fc4e4a85_v2_p1b1.mp4`
-- `fc4e4a85_v2_p1b2.mp4`
-- `fc4e4a85_v2_p1c.mp4`
-- `fc4e4a85_v2_p1d.mp4`
-- `fc4e4a85_v2_p2a.mp4`
-- `fc4e4a85_v2_p2b.mp4`
+| # | 内容简介 | 时长 | 在线播放 |
+|---|---|---|---|
+| 1 | 知识库文档列表 → 打开设置，进入插件服务统一控制面 | 8s | [播放](https://github.com/user-attachments/assets/5a8588c0-5fba-4f31-b7b5-a48e087e1341) |
+| 2 | 插件服务中切换单个插件的运行方式（可信 / 离线） | 4s | [播放](https://github.com/user-attachments/assets/e8a28f84-36df-446c-a04b-32837c9a907c) |
+| 3 | 打开「添加数据源」，外部插件类型出现在选择列表中 | 6s | [播放](https://github.com/user-attachments/assets/36049a52-c3f5-4ea4-84f3-176e6ffb4ee9) |
+| 4 | 逐一浏览插件服务、数据源、模型等设置页 | 21s | [播放](https://github.com/user-attachments/assets/3bdc9c73-2cf8-4de9-ad56-f2b0de63cd15) |
+| 5 | 插件服务页核对插件状态与运行方式 | 15s | [播放](https://github.com/user-attachments/assets/a375a955-ec32-405c-8bc5-08c653acc6f6) |
+| 6 | 模型配置与向量库 / 数据源设置（插件化模型与检索） | 27s | [播放](https://github.com/user-attachments/assets/c7ae3364-633c-4b3a-810a-c82c661d5dba) |
+| 7 | 设置页巡检：插件、模型、数据源等入口的完整走查 | 25s | [播放](https://github.com/user-attachments/assets/7e451b7d-0806-437a-ac63-284dcf427da6) |
+| 8 | 数据源管理：增量同步 | 31s | [播放](https://github.com/user-attachments/assets/535174a8-6fe8-4ad5-a35b-5bcd55d1ce64) |
+
+> 原始视频文件（`fc4e4a85_v2_*.mp4` 等）随交付材料一并提供。
+
+---
+
+## 十三、运行与测试命令
+
+### 13.1 运行
+
+**Docker 部署（生产态）**：先复制环境模板，并在 `.env` 中填入一个**非空**的 `WEKNORA_PLUGIN_RUNTIME_AGENT_TOKEN`（插件运行时 agent 的认证令牌，留空会导致 Compose 拒绝启动）：
+
+```bash
+cp .env.example .env
+# 编辑 .env，将 token 设为随机值：
+# WEKNORA_PLUGIN_RUNTIME_AGENT_TOKEN=<random-secret>
+
+docker compose up -d
+```
+
+**快速开发模式（开发态）**：以下三条命令需在**独立终端**按顺序执行——`dev-start` 拉起基础设施，`dev-app` 启动本地后端（依赖前者提供的数据库与 Redis），`dev-frontend` 启动前端：
+
+```bash
+# 终端 1：基础设施（PostgreSQL / Redis / MinIO 等）
+make dev-start
+
+# 终端 2：本地后端
+make dev-app
+
+# 终端 3：前端
+make dev-frontend
+```
+
+插件目录由 `WEKNORA_PLUGIN_DIR_{datasource,parser,search,model,retriever}` 指定（见第五节）；安装与配置详见 [README_CN.md](README_CN.md)。
+
+### 13.2 测试
+
+```bash
+make test                                        # 全量单元/契约测试
+go test ./internal/plugin/... ./internal/datasource/... ./pkg/pluginapi/...
+
+# 端到端：独立仓库插件 + 进程运行时
+WEKNORA_LOCALDIR_PLUGIN_ROOT=/path/to/weknora-plugin-localdir \
+  go test ./internal/plugin/ -run TestExternalLocalDirectoryProcessRuntime -v
+
+# 安全验收（Docker 部署：19 项核心控制 + 4 项网络策略验证）
+WEKNORA_ADMIN_EMAIL=you@example.com WEKNORA_ADMIN_PASSWORD='***' \
+  bash scripts/plugin-security-acceptance.sh
+```
+
+测试分层、覆盖范围与证据位置见 [`docs/testing.md`](docs/testing.md)。
