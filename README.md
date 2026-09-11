@@ -28,7 +28,7 @@ WeKnora 的目标是帮用户**记住并熟悉自己的文档**——把散落�
 | **呈现**：知识网络如何可视化，「点亮」如何被感知 | 十档水位球、水波动效、档位筛选、边界涟漪（见第三章截图） |
 | **设计说明** | 本文档（第一~五章） |
 | **可运行原型** | 后端 8 接口 + 6 账本 + 双端迁移；前端完整可视化与交互 |
-| **验证有效性** | 离线回放为首选方案，数据基础全部就位（见 6.4） |
+| **验证有效性** | 离线回放为首选方案，数据基础全部就位、**回放任务未实现**（见 6.4；局限声明见 6.5 第 4 条） |
 | **租户隔离 + 查看 / 导出 / 删除** | `scoped()` 隔离 + 3 个画像接口 + 前端弹窗 + 关闭开关 |
 
 > 课题说明「可以只做其中一部分」，我们**四个角度全部实现**，并让它们互相咬合：关联决定节点粒度，度量决定水位算法，引导消费水位产出推荐，呈现把整条链路可视化。
@@ -162,7 +162,7 @@ if level == 100 {
 |---|---|
 | 无模型、无随机 | 结果可解释：用户问「为什么是这个水位」，我们能逐项算出每个信号的贡献 |
 | 无隐藏状态 | **可回放**：给定证据集与时间点，能重算出任意历史时刻的水位，不需要重跑历史代码 |
-| 确定性 | **可测试**：同样的输入必得同样的输出，44 个单元测试正是建立在这条性质上 |
+| 确定性 | **可测试**：同样的输入必得同样的输出，45 个单元测试正是建立在这条性质上 |
 
 ### 2.4 算法二：分信号 + 分日衰减
 
@@ -456,7 +456,9 @@ https://github.com/user-attachments/assets/95e0613e-0550-42eb-86a7-e8f0973b136d
 
 | 位置 | 内容 |
 |---|---|
-| `internal/application/service/mastery/config.go` | 后端 11 个常量（权重、封顶、衰减、档位阈值） |
+| `internal/application/service/mastery/config.go` | 后端 14 个常量（权重、封顶、衰减、档位阈值） |
+| `internal/application/service/mastery/boundary.go` | 5 个 PPR 常量（种子阈值、Top-K、阻尼 α、收敛容差、迭代上限） |
+| `internal/types/mastery.go` | 1 个：`MasteryMaxPageViewSeconds`（单次浏览封顶 300 秒，与前端 `PAGE_VIEW_MAX_SECONDS` 同值） |
 | `frontend/src/views/knowledge/wiki/WikiBrowser.vue` | 前端 4 个常量（计时清洗、动效） |
 
 ### 4.2 五条一致性约束：这些参数不能单独乱调
@@ -501,6 +503,8 @@ https://github.com/user-attachments/assets/95e0613e-0550-42eb-86a7-e8f0973b136d
 | `DecayFloor` | 0.35 | 离开后保留多少痕迹 | 永不衰减（等价于没有衰减） | 归零，回到「从未接触」 |
 | `FreshnessDays` | 7 | 水波流动多久 | 到处在晃，变成噪音 | 一晃就停，看不出「活跃」 |
 
+> 上表展开 12 个；另 2 个是档位下限 `TouchScore = 1` / `FamiliarScore = 4`，它们的约束作用见 4.2（一次引用恰落在接触起点、4 分起进入熟悉档）。
+
 ### 4.4 参数 → 体验的因果表（前端）
 
 | 参数 | 值 | 它决定了什么体验 | 为什么是这个值 |
@@ -512,7 +516,7 @@ https://github.com/user-attachments/assets/95e0613e-0550-42eb-86a7-e8f0973b136d
 
 ### 4.5 参数治理
 
-- **全部集中定义**，业务代码不写死阈值、权重、窗口、上限；
+- **集中定义**：体验参数与 PPR 算法常量各自集中在固定位置（见 4.1），业务代码不写死阈值、权重、窗口、上限——唯一的例外是实现层的批大小安全阀（`masteryWriteBatchSize`），它只决定一条语句装多少行，不参与任何评分；
 - **双侧同步**：后端与前端常量在注释中互相注明（如 `PAGE_VIEW_MAX_SECONDS` ↔ `MasteryMaxPageViewSeconds`）；
 - **标注耦合关系**：参数之间标注依赖（见 4.2），避免单侧调整破坏既有性质；
 - **单侧不可私自调**：改 `ViewWeight` 要复核 `SatScore`，改 `SpreadFactor` 要复核 `SpreadCap`。
@@ -675,7 +679,7 @@ internal/handler/mastery.go                  ← HTTP 层：校验、投影元�
 internal/router/routes_memory.go             ← 路由注册
 ```
 
-**分层的价值**：算法层不依赖 HTTP 与 SQL，所以它能被**纯粹地单测**——44 个测试函数里有 30 个直接打在这些纯函数上，不需要起数据库。
+**分层的价值**：算法层不依赖 HTTP 与 SQL，所以它能被**纯粹地单测**——45 个测试函数里有 30 个直接打在这些纯函数上，不需要起数据库。
 
 ### 5.7 前端关键链路
 
@@ -745,14 +749,14 @@ internal/router/routes_memory.go             ← 路由注册
 
 | 维度 | 规模 |
 |---|---|
-| 新增后端实现代码 | **3,061 行**（服务 1,124 / 仓储 790 / 类型·接口 445 / 接口层 702） |
+| 新增后端实现代码 | **3,076 行**（服务 1,130 / 仓储 799 / 类型·接口 445 / 接口层 702） |
 | 单元测试 | **45 个测试函数、1,375 行**（测试与实现比 ≈ 45%） |
 | 数据库迁移 | **8 组、16 个文件**（PostgreSQL 与 SQLite 双端同步） |
 | 新增数据表 | **6 张专用账本**，与检索重排数据完全解耦 |
 | 对外接口 | **8 个**（路径中不含 subject id，主体来自调用者身份） |
 | 图接口扩展 | **1 个**（`?mastery=true` 附带水位、边界标记、最近活跃） |
 | 前端交互 | **7 个模块**（视图开关、水位球、水波、档位筛选、推荐、画像、图谱扩展） |
-| 可调常量 | 后端 11 个 + 前端 4 个，集中定义、双侧同步 |
+| 可调常量 | 后端 20 个（config 14 / PPR 5 / 上限 1）+ 前端 4 个，集中定义、双侧同步 |
 | 依赖新增 | **0**（不依赖 Neo4j，PostgreSQL 与桌面 Lite 均可运行） |
 
 > **规模口径（可复现）**：以上为 `git diff --numstat upstream/main -- <路径>` 的 added 行数。
@@ -931,7 +935,7 @@ npm run type-check
 
 ## 附：可调参数总表
 
-**后端**（`internal/application/service/mastery/config.go`）
+**后端**（`internal/application/service/mastery/config.go`；`MasteryMaxPageViewSeconds` 在 `internal/types/mastery.go`）
 
 | 常量 | 值 | 含义 |
 |---|---|---|
@@ -945,6 +949,15 @@ npm run type-check
 | `MasteredScore` / `SatScore` | 8 / 12 | 掌握档起点 / 饱和阈值 |
 | `MasteryMaxPageViewSeconds` | 300 | 单次浏览时长封顶（服务端二次钳制） |
 | 同页去重 | 按天 | `types.MasteryPageViewDayStart` |
+
+**PPR 边界**（`internal/application/service/mastery/boundary.go`）
+
+| 常量 | 值 | 含义 |
+|---|---|---|
+| `FamiliarLevel` | 40 | 作为个性化起点的水位门槛（与前端「已熟悉」判定同源） |
+| `DefaultBoundaryTopK` | 12 | 边界候选上限（图上最多高亮几个节点） |
+| `alpha` | 0.15 | 个性化 PageRank 阻尼系数 |
+| `tolerance` / `maxIter` | 1e-8 / 100 | 迭代收敛容差与上限 |
 
 **前端**（`frontend/src/views/knowledge/wiki/WikiBrowser.vue`）
 
