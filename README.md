@@ -432,14 +432,17 @@ CreditedWeight = total * weights[i] / sum // 归一化后按份额分配
 
 ### 3.6 视频演示
 
-**演示一**
+**演示一：知识引导视图**
 
 https://github.com/user-attachments/assets/5239fa60-dae4-4571-9d32-cb2fabd901f5
 
+*在知识引导视图中查看节点水位、相邻关系高亮与边界涟漪。*
 
-**演示二**
+**演示二：个人知识画像**
 
 https://github.com/user-attachments/assets/95e0613e-0550-42eb-86a7-e8f0973b136d
+
+*查看个人知识画像的节点明细，并导出 HTML 报告。*
 
 ---
 
