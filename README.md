@@ -433,10 +433,12 @@ CreditedWeight = total * weights[i] / sum // 归一化后按份额分配
 ### 3.6 视频演示
 
 **演示一**
+
 https://github.com/user-attachments/assets/5239fa60-dae4-4571-9d32-cb2fabd901f5
 
 
 **演示二**
+
 https://github.com/user-attachments/assets/95e0613e-0550-42eb-86a7-e8f0973b136d
 
 ---
