@@ -432,20 +432,15 @@ CreditedWeight = total * weights[i] / sum // 归一化后按份额分配
 
 ### 3.6 视频演示
 
-<!-- 上传说明（此注释在页面上不显示）：
-     在 GitHub 网页上点开本文件的编辑模式，把视频文件拖到下面留空的行上，
-     GitHub 会自动上传并插入形如 https://github.com/user-attachments/assets/<hash> 的链接，
-     该链接在页面上会直接渲染成播放器。
-     两个视频：课题四_20M_1.mp4（8.8 MB）、课题四_20M_2.mp4（9.1 MB），均在 10 MB 以内。
-     视频文件不进仓库，避免 18 MB 永久占用 Git 历史。 -->
 
 **演示一**
 
-*（此处放置第一段录屏）*
+https://github.com/user-attachments/assets/95e0613e-0550-42eb-86a7-e8f0973b136d
+
 
 **演示二**
 
-*（此处放置第二段录屏）*
+https://github.com/user-attachments/assets/5239fa60-dae4-4571-9d32-cb2fabd901f5
 
 ---
 
