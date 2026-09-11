@@ -820,10 +820,24 @@ OpenSession(config):
 
 以下是五类扩展点插件在 Docker 部署与快速开发模式下的实机测试录像（共 7 段）：
 
-- `fc4e4a85_v2_p1a.mp4`
-- `fc4e4a85_v2_p1b1.mp4`
-- `fc4e4a85_v2_p1b2.mp4`
-- `fc4e4a85_v2_p1c.mp4`
-- `fc4e4a85_v2_p1d.mp4`
-- `fc4e4a85_v2_p2a.mp4`
-- `fc4e4a85_v2_p2b.mp4`
+- `
+https://github.com/user-attachments/assets/5a8588c0-5fba-4f31-b7b5-a48e087e1341
+`
+
+https://github.com/user-attachments/assets/e8a28f84-36df-446c-a04b-32837c9a907c
+
+
+https://github.com/user-attachments/assets/36049a52-c3f5-4ea4-84f3-176e6ffb4ee9
+
+
+https://github.com/user-attachments/assets/3bdc9c73-2cf8-4de9-ad56-f2b0de63cd15
+
+
+https://github.com/user-attachments/assets/a375a955-ec32-405c-8bc5-08c653acc6f6
+
+
+https://github.com/user-attachments/assets/c7ae3364-633c-4b3a-810a-c82c661d5dba
+
+
+https://github.com/user-attachments/assets/7e451b7d-0806-437a-ac63-284dcf427da6
+
