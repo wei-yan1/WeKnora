@@ -11,5 +11,5 @@ result:
 repository:
   url: "https://github.com/wei-yan1/WeKnora.git"
   branch: "codex/knowledge-mastery"
-  commit: "2b83aad4d9ca5546b4425db6533b36b66ad9a8e8"
+  commit: "792fdf0dba1c7e13ffe016c3ad5fed33fb36ffd5"
   tag: "rhino-2026-final-4"
