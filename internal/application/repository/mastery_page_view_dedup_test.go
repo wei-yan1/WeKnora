@@ -30,6 +30,8 @@ func newMasteryDedupDB(t *testing.T, name string) (*gorm.DB, interfaces.MasteryR
 		&types.MemoryMasteryDaily{},
 		&types.MemoryGuideExposure{},
 		&types.MemorySpreadView{},
+		&types.MemoryCitation{},
+		&types.MemoryAnswerLike{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

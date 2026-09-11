@@ -23,6 +23,9 @@ type MasteryRepository interface {
 	CancelAnswerLike(ctx context.Context, scope MemoryScope, messageID string) error
 	// RecordExposure writes one guidance exposure row.
 	RecordExposure(ctx context.Context, scope MemoryScope, exp *types.MemoryGuideExposure) error
+	// RecordExposureBatch writes several exposure rows at once, so one ripple's
+	// whole candidate list costs a single statement.
+	RecordExposureBatch(ctx context.Context, scope MemoryScope, exps []*types.MemoryGuideExposure) error
 	// ListCitations returns all citation rows for a KB.
 	ListCitations(ctx context.Context, scope MemoryScope, kbID string) ([]*types.MemoryCitation, error)
 	// ListPageViews returns all page-view rows for a KB.
@@ -39,12 +42,18 @@ type MasteryRepository interface {
 	// water level decay each day on its own clock instead of decaying a lumped
 	// total by a single latest timestamp; the split keeps that read bounded.
 	ListDailyViews(ctx context.Context, scope MemoryScope, kbID string, cutoff time.Time) (recent, cold []types.MasteryDailyBucket, err error)
+	// LoadNodeLedger returns only the ledger rows needed to score one page: the
+	// citations of its source documents, its own view row and its own daily
+	// buckets. The graph overlay needs the whole KB; the page-view echo needs one
+	// node, and reading the whole KB for it made a page view cost scale with the
+	// knowledge base rather than with the page.
+	LoadNodeLedger(ctx context.Context, scope MemoryScope, kbID, slug string, sourceKnowledgeIDs []string, cutoff time.Time) (*types.NodeLedger, error)
 	// ListActiveLikes returns all non-cancelled like rows.
 	ListActiveLikes(ctx context.Context, scope MemoryScope) ([]*types.MemoryAnswerLike, error)
-	// HasExposureToday reports whether the scope already exposed (trigger,
-	// candidate) in the given KB today, so repeated clicks on the same center
-	// don't spam the exposure log.
-	HasExposureToday(ctx context.Context, scope MemoryScope, kbID, triggerSlug, candidateSlug string) (bool, error)
+	// ListExposedToday returns the candidate slugs already exposed today for one
+	// (kb, trigger) pair, so the caller can filter a whole ripple in one read
+	// instead of asking about each candidate separately.
+	ListExposedToday(ctx context.Context, scope MemoryScope, kbID, triggerSlug string) (map[string]struct{}, error)
 	// MarkExposureClicked marks the most recent unclicked exposure for a
 	// candidate in a KB as clicked.
 	MarkExposureClicked(ctx context.Context, scope MemoryScope, kbID, candidateSlug string) error

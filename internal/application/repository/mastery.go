@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -28,54 +29,93 @@ func (r *masteryRepository) scoped(ctx context.Context, scope interfaces.MemoryS
 		Where("tenant_id = ? AND subject_id = ?", scope.TenantID, scope.SubjectID)
 }
 
-// BumpCitation records cited docs in the guidance ledger. It mirrors
-// memoryRepository.BumpDocAffinity's insert-then-increment shape for idempotency.
+// BumpCitation records cited docs in the guidance ledger, in two statements no
+// matter how many documents the answer cited.
+//
+// It used to be an insert-then-increment pair per document plus a two-statement
+// daily bump — four round trips per citation, on the path every RAG answer takes.
+// The shape is now the one BumpSpreadViews established: deduplicate in Go, then a
+// single multi-row upsert, because PostgreSQL rejects a statement that touches one
+// conflict key twice.
+//
+// The deduplication also has to keep the old per-row rule, which is why the last
+// mention of a document wins for knowledge_base_id but an unknown knowledge base
+// never erases a known one: the single-row form updated that column only when it
+// was non-empty.
 func (r *masteryRepository) BumpCitation(
 	ctx context.Context, scope interfaces.MemoryScope, docs []types.MemoryDocAffinity,
 ) error {
+	if len(docs) == 0 {
+		return nil
+	}
 	now := time.Now()
+
+	type citedDoc struct {
+		knowledgeID string
+		kbID        string
+	}
+	order := make([]string, 0, len(docs))
+	byID := make(map[string]*citedDoc, len(docs))
 	for _, doc := range docs {
 		if doc.KnowledgeID == "" {
 			continue
 		}
-		row := &types.MemoryCitation{
+		existing, ok := byID[doc.KnowledgeID]
+		if !ok {
+			byID[doc.KnowledgeID] = &citedDoc{knowledgeID: doc.KnowledgeID, kbID: doc.KnowledgeBaseID}
+			order = append(order, doc.KnowledgeID)
+			continue
+		}
+		if doc.KnowledgeBaseID != "" {
+			existing.kbID = doc.KnowledgeBaseID
+		}
+	}
+	if len(order) == 0 {
+		return nil
+	}
+
+	rows := make([]*types.MemoryCitation, 0, len(order))
+	daily := make([]dailyEntry, 0, len(order))
+	for _, id := range order {
+		cited := byID[id]
+		rows = append(rows, &types.MemoryCitation{
 			ID:              uuid.New().String(),
 			TenantID:        scope.TenantID,
 			SubjectID:       scope.SubjectID,
-			KnowledgeID:     doc.KnowledgeID,
-			KnowledgeBaseID: doc.KnowledgeBaseID,
-			LastCitedAt:     now,
-		}
-		if err := r.db.WithContext(ctx).
-			Clauses(clause.OnConflict{
-				Columns: []clause.Column{
-					{Name: "tenant_id"}, {Name: "subject_id"}, {Name: "knowledge_id"},
-				},
-				DoNothing: true,
-			}).
-			Create(row).Error; err != nil {
-			return err
-		}
-		updates := map[string]interface{}{
-			"cite_count":    gorm.Expr("cite_count + 1"),
-			"last_cited_at": now,
-			"updated_at":    now,
-		}
-		if doc.KnowledgeBaseID != "" {
-			updates["knowledge_base_id"] = doc.KnowledgeBaseID
-		}
-		if err := r.scoped(ctx, scope).
-			Model(&types.MemoryCitation{}).
-			Where("knowledge_id = ?", doc.KnowledgeID).
-			Updates(updates).Error; err != nil {
-			return err
-		}
+			KnowledgeID:     cited.knowledgeID,
+			KnowledgeBaseID: cited.kbID,
+			// The increment rides on the proposed row so a fresh insert and an
+			// upserted increment land on the same value.
+			CiteCount:   1,
+			LastCitedAt: now,
+		})
 		// 日聚合：citation 事件按文档 knowledge_id 记账。
-		if err := r.bumpDaily(ctx, scope, doc.KnowledgeBaseID, doc.KnowledgeID, types.MasteryEventCitation, 1, 0); err != nil {
-			return err
-		}
+		daily = append(daily, dailyEntry{
+			kbID:      cited.kbID,
+			subject:   cited.knowledgeID,
+			eventType: types.MasteryEventCitation,
+			count:     1,
+		})
 	}
-	return nil
+
+	if err := r.db.WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "tenant_id"}, {Name: "subject_id"}, {Name: "knowledge_id"},
+			},
+			DoUpdates: clause.Assignments(map[string]interface{}{
+				"cite_count":    gorm.Expr("memory_citations.cite_count + excluded.cite_count"),
+				"last_cited_at": gorm.Expr("excluded.last_cited_at"),
+				"knowledge_base_id": gorm.Expr(
+					"CASE WHEN excluded.knowledge_base_id <> '' THEN excluded.knowledge_base_id " +
+						"ELSE memory_citations.knowledge_base_id END"),
+				"updated_at": now,
+			}),
+		}).
+		CreateInBatches(rows, masteryWriteBatchSize).Error; err != nil {
+		return err
+	}
+	return r.bumpDailyBatch(ctx, scope, daily)
 }
 
 // BumpPageView records one effective page view with its duration.
@@ -142,49 +182,109 @@ func (r *masteryRepository) BumpPageView(
 	return r.bumpDailyOncePerDay(ctx, scope, kbID, slug, types.MasteryEventView, duration)
 }
 
-// bumpDaily upserts a daily aggregation bucket. The slug column stores the event
-// subject: a page slug for views, a knowledge id for citations. It is the cheap
-// event ledger that backs time-split replay and time-decay without a full log.
-func (r *masteryRepository) bumpDaily(
-	ctx context.Context, scope interfaces.MemoryScope, kbID, subject, eventType string, count int, duration int64,
+// masteryWriteBatchSize bounds how many ledger rows go into one statement. It is a
+// safety valve for pathological input, not the normal path: one answer cites a
+// handful of documents and one ripple holds at most three candidates.
+const masteryWriteBatchSize = 128
+
+// dailyEntry is one increment of the daily aggregation bucket: how much of one
+// signal landed on one subject on one day.
+type dailyEntry struct {
+	kbID      string
+	subject   string // page slug for views, knowledge id for citations and likes
+	eventType string
+	count     int
+	duration  int64
+}
+
+// bumpDailyBatch upserts daily buckets in one statement.
+//
+// It replaced an insert-then-update pair per row: two round trips for what a single
+// ON CONFLICT DO UPDATE expresses, and the sibling writers (bumpDailyOncePerDay,
+// BumpSpreadViews) had already moved to the single-statement shape — keeping both
+// meant the same invariant documented in two places and enforced in one.
+//
+// Entries sharing a conflict key are summed here before the statement is built.
+// That is not only tidiness: PostgreSQL rejects a statement that touches one
+// conflict key twice, so a caller must not be able to build one by accident.
+func (r *masteryRepository) bumpDailyBatch(
+	ctx context.Context, scope interfaces.MemoryScope, entries []dailyEntry,
 ) error {
-	if subject == "" || eventType == "" {
+	if len(entries) == 0 {
 		return nil
 	}
 	now := time.Now()
 	date := now.Format("2006-01-02")
-	row := &types.MemoryMasteryDaily{
-		ID:              uuid.New().String(),
-		TenantID:        scope.TenantID,
-		SubjectID:       scope.SubjectID,
-		KnowledgeBaseID: kbID,
-		Slug:            subject,
-		EventType:       eventType,
-		EventDate:       date,
+
+	type dailyKey struct{ kbID, subject, eventType string }
+	order := make([]dailyKey, 0, len(entries))
+	merged := make(map[dailyKey]*dailyEntry, len(entries))
+	for _, e := range entries {
+		if e.subject == "" || e.eventType == "" {
+			continue
+		}
+		if e.count == 0 && e.duration == 0 {
+			continue
+		}
+		k := dailyKey{e.kbID, e.subject, e.eventType}
+		if existing, ok := merged[k]; ok {
+			existing.count += e.count
+			existing.duration += e.duration
+			continue
+		}
+		copied := e
+		merged[k] = &copied
+		order = append(order, k)
 	}
-	if err := r.db.WithContext(ctx).
+	if len(order) == 0 {
+		return nil
+	}
+
+	rows := make([]*types.MemoryMasteryDaily, 0, len(order))
+	for _, k := range order {
+		e := merged[k]
+		rows = append(rows, &types.MemoryMasteryDaily{
+			ID:              uuid.New().String(),
+			TenantID:        scope.TenantID,
+			SubjectID:       scope.SubjectID,
+			KnowledgeBaseID: e.kbID,
+			Slug:            e.subject,
+			EventType:       e.eventType,
+			EventDate:       date,
+			// The insert path carries its own increment, so a fresh row and an
+			// upserted one land on the same value.
+			EventCount:  e.count,
+			DurationSum: e.duration,
+		})
+	}
+	return r.db.WithContext(ctx).
 		Clauses(clause.OnConflict{
 			Columns: []clause.Column{
 				{Name: "tenant_id"}, {Name: "subject_id"}, {Name: "knowledge_base_id"},
 				{Name: "slug"}, {Name: "event_type"}, {Name: "event_date"},
 			},
-			DoNothing: true,
+			DoUpdates: clause.Assignments(map[string]interface{}{
+				"event_count":  gorm.Expr("memory_mastery_daily.event_count + excluded.event_count"),
+				"duration_sum": gorm.Expr("memory_mastery_daily.duration_sum + excluded.duration_sum"),
+				"updated_at":   now,
+			}),
 		}).
-		Create(row).Error; err != nil {
-		return err
-	}
-	updates := map[string]interface{}{
-		"event_count": gorm.Expr("event_count + ?", count),
-		"updated_at":  now,
-	}
-	if duration > 0 {
-		updates["duration_sum"] = gorm.Expr("duration_sum + ?", duration)
-	}
-	return r.scoped(ctx, scope).
-		Model(&types.MemoryMasteryDaily{}).
-		Where("knowledge_base_id = ? AND slug = ? AND event_type = ? AND event_date = ?",
-			kbID, subject, eventType, date).
-		Updates(updates).Error
+		CreateInBatches(rows, masteryWriteBatchSize).Error
+}
+
+// bumpDaily upserts a single daily aggregation bucket. The slug column stores the
+// event subject: a page slug for views, a knowledge id for citations. It is the
+// cheap event ledger that backs time-split replay and time-decay without a full log.
+func (r *masteryRepository) bumpDaily(
+	ctx context.Context, scope interfaces.MemoryScope, kbID, subject, eventType string, count int, duration int64,
+) error {
+	return r.bumpDailyBatch(ctx, scope, []dailyEntry{{
+		kbID:      kbID,
+		subject:   subject,
+		eventType: eventType,
+		count:     count,
+		duration:  duration,
+	}})
 }
 
 // bumpDailyOncePerDay upserts a daily bucket whose count is capped at one per
@@ -277,29 +377,55 @@ func (r *masteryRepository) CancelAnswerLike(
 func (r *masteryRepository) RecordExposure(
 	ctx context.Context, scope interfaces.MemoryScope, exp *types.MemoryGuideExposure,
 ) error {
-	exp.ID = uuid.New().String()
-	exp.TenantID = scope.TenantID
-	exp.SubjectID = scope.SubjectID
-	return r.db.WithContext(ctx).Create(exp).Error
+	return r.RecordExposureBatch(ctx, scope, []*types.MemoryGuideExposure{exp})
 }
 
-// HasExposureToday reports whether the scope already exposed a candidate for a
-// given (kb, trigger) today, so repeated clicks on the same center don't spam
-// the exposure log.
-func (r *masteryRepository) HasExposureToday(
-	ctx context.Context, scope interfaces.MemoryScope, kbID, triggerSlug, candidateSlug string,
-) (bool, error) {
-	// 本地日历零点，与日聚合桶的 event_date（同样是本地日期）保持一致。
-	// time.Truncate(24h) 是按 UTC 边界切的，东八区会变成当地 08:00 换天。
+// RecordExposureBatch writes a ripple's exposures in one statement. Scope and id
+// are stamped here; ShownAt is left as the caller set it, so every candidate of one
+// ripple carries the same instant.
+func (r *masteryRepository) RecordExposureBatch(
+	ctx context.Context, scope interfaces.MemoryScope, exps []*types.MemoryGuideExposure,
+) error {
+	if len(exps) == 0 {
+		return nil
+	}
+	for _, exp := range exps {
+		exp.ID = uuid.New().String()
+		exp.TenantID = scope.TenantID
+		exp.SubjectID = scope.SubjectID
+	}
+	return r.db.WithContext(ctx).CreateInBatches(exps, masteryWriteBatchSize).Error
+}
+
+// ListExposedToday returns the candidate slugs already exposed today for one
+// (kb, trigger) pair, in a single read.
+//
+// The caller filters a whole ripple against it. It replaced a per-candidate "has
+// this one been shown today?" count, which turned one node click into a round trip
+// per candidate — and a ripple is a dozen candidates.
+//
+// The window is the local calendar day, matching the daily bucket's event_date and
+// the page-view fold: time.Truncate(24h) cuts at UTC boundaries instead, i.e. 08:00
+// in UTC+8.
+func (r *masteryRepository) ListExposedToday(
+	ctx context.Context, scope interfaces.MemoryScope, kbID, triggerSlug string,
+) (map[string]struct{}, error) {
 	now := time.Now()
 	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	var n int64
-	err := r.scoped(ctx, scope).
+	var slugs []string
+	if err := r.scoped(ctx, scope).
 		Model(&types.MemoryGuideExposure{}).
-		Where("knowledge_base_id = ? AND trigger_slug = ? AND candidate_slug = ? AND shown_at >= ?",
-			kbID, triggerSlug, candidateSlug, dayStart).
-		Count(&n).Error
-	return n > 0, err
+		Where("knowledge_base_id = ? AND trigger_slug = ? AND shown_at >= ?",
+			kbID, triggerSlug, dayStart).
+		Distinct().
+		Pluck("candidate_slug", &slugs).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]struct{}, len(slugs))
+	for _, s := range slugs {
+		out[s] = struct{}{}
+	}
+	return out, nil
 }
 
 // MarkExposureClicked marks the most recent unclicked exposure for a candidate
@@ -396,8 +522,12 @@ var (
 // summed row per slug scores identically to the individual days. Cold rows come
 // back with an empty EventDate — that is how the caller knows to stamp them with
 // the cutoff day.
+//
+// An empty slug reads the whole KB (the graph overlay needs every page); a set slug
+// narrows to one page, which is all the page-view echo needs. Same fold, same shape
+// either way, so the two callers cannot drift apart.
 func (r *masteryRepository) listDailyBuckets(
-	ctx context.Context, scope interfaces.MemoryScope, kbID string, ledger dailyLedger, cutoff time.Time,
+	ctx context.Context, scope interfaces.MemoryScope, kbID string, ledger dailyLedger, cutoff time.Time, slug string,
 ) (recent, cold []types.MasteryDailyBucket, err error) {
 	cutoffDate := cutoff.Format("2006-01-02")
 	// A fresh chain per query: reusing one *gorm.DB would let the first statement's
@@ -406,6 +536,9 @@ func (r *masteryRepository) listDailyBuckets(
 		q := r.scoped(ctx, scope).Where("knowledge_base_id = ?", kbID)
 		if ledger.filter != "" {
 			q = q.Where(ledger.filter, ledger.filterArgs...)
+		}
+		if slug != "" {
+			q = q.Where("slug = ?", slug)
 		}
 		return q
 	}
@@ -461,7 +594,7 @@ func normalizeBucketDay(raw string) string {
 func (r *masteryRepository) ListDailyViews(
 	ctx context.Context, scope interfaces.MemoryScope, kbID string, cutoff time.Time,
 ) (recent, cold []types.MasteryDailyBucket, err error) {
-	return r.listDailyBuckets(ctx, scope, kbID, viewDailyLedger, cutoff)
+	return r.listDailyBuckets(ctx, scope, kbID, viewDailyLedger, cutoff, "")
 }
 
 // spreadWriteBatchSize bounds how many neighbour rows go into one statement. It is
@@ -537,7 +670,85 @@ func (r *masteryRepository) BumpSpreadViews(
 func (r *masteryRepository) ListDailySpread(
 	ctx context.Context, scope interfaces.MemoryScope, kbID string, cutoff time.Time,
 ) (recent, cold []types.MasteryDailyBucket, err error) {
-	return r.listDailyBuckets(ctx, scope, kbID, spreadDailyLedger, cutoff)
+	return r.listDailyBuckets(ctx, scope, kbID, spreadDailyLedger, cutoff, "")
+}
+
+// LoadNodeLedger returns the ledger rows that can possibly affect one page's water
+// level, and nothing else.
+//
+// Every read below is a point lookup inside the same (tenant, subject) scope the
+// KB-wide reads use, with row counts bounded by one page instead of by the
+// knowledge base: this slug's daily buckets, this slug's view row, and the
+// citations of the documents this page is built from.
+//
+// The subject's like rows are the one exception, and they are still read whole: the
+// like snapshot is keyed by message and its document scope lives inside the
+// allocations JSON, so there is no column to narrow on. Filtering those is a schema
+// question rather than a query one — and narrowing the other four is what removes
+// the read that actually scales, since daily buckets grow with pages × days, not
+// with the number of answers the subject liked.
+func (r *masteryRepository) LoadNodeLedger(
+	ctx context.Context, scope interfaces.MemoryScope, kbID, slug string,
+	sourceKnowledgeIDs []string, cutoff time.Time,
+) (*types.NodeLedger, error) {
+	out := &types.NodeLedger{}
+	if kbID == "" || slug == "" {
+		return out, nil
+	}
+
+	// Source ids come from the wiki page; duplicates would only widen the IN list.
+	ids := make([]string, 0, len(sourceKnowledgeIDs))
+	seen := make(map[string]struct{}, len(sourceKnowledgeIDs))
+	for _, id := range sourceKnowledgeIDs {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) > 0 {
+		if err := r.scoped(ctx, scope).
+			Where("knowledge_base_id = ?", kbID).
+			Where("knowledge_id IN ?", ids).
+			Find(&out.Citations).Error; err != nil {
+			return nil, err
+		}
+	}
+	if err := r.scoped(ctx, scope).
+		Where("cancelled_at IS NULL").
+		Find(&out.Likes).Error; err != nil {
+		return nil, err
+	}
+
+	var view types.MemoryPageView
+	switch err := r.scoped(ctx, scope).
+		Where("knowledge_base_id = ? AND slug = ?", kbID, slug).
+		Take(&view).Error; {
+	case err == nil:
+		out.View = &view
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		// Never viewed: Evidence leaves the view fields at zero, exactly as the
+		// KB-wide read does when the page has no row.
+	default:
+		return nil, err
+	}
+
+	recentViews, coldViews, err := r.listDailyBuckets(ctx, scope, kbID, viewDailyLedger, cutoff, slug)
+	if err != nil {
+		return nil, err
+	}
+	recentSpread, coldSpread, err := r.listDailyBuckets(ctx, scope, kbID, spreadDailyLedger, cutoff, slug)
+	if err != nil {
+		return nil, err
+	}
+	// Cold rows keep their empty EventDate and are stamped with the cutoff day by
+	// the caller, so merging the two reads loses nothing.
+	out.ViewBuckets = append(recentViews, coldViews...)
+	out.SpreadBuckets = append(recentSpread, coldSpread...)
+	return out, nil
 }
 
 func (r *masteryRepository) ListActiveLikes(
@@ -552,18 +763,28 @@ func (r *masteryRepository) ListActiveLikes(
 
 // DeleteAll drops every guidance ledger row in the scope. It deliberately does
 // not touch memory_doc_affinity or any long-term memory table.
+//
+// All six deletes run in one transaction. This is a privacy guarantee, not a
+// convenience: as separate statements a failure part-way through left some ledgers
+// cleared and others untouched, and the user — who sees only an error — cannot tell
+// which half survived. The transaction makes the outcome all-or-nothing, which is
+// what "your profile is deleted" has to mean.
 func (r *masteryRepository) DeleteAll(ctx context.Context, scope interfaces.MemoryScope) error {
-	for _, model := range []interface{}{
-		&types.MemorySpreadView{},
-		&types.MemoryMasteryDaily{},
-		&types.MemoryGuideExposure{},
-		&types.MemoryAnswerLike{},
-		&types.MemoryPageView{},
-		&types.MemoryCitation{},
-	} {
-		if err := r.scoped(ctx, scope).Delete(model).Error; err != nil {
-			return err
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, model := range []interface{}{
+			&types.MemorySpreadView{},
+			&types.MemoryMasteryDaily{},
+			&types.MemoryGuideExposure{},
+			&types.MemoryAnswerLike{},
+			&types.MemoryPageView{},
+			&types.MemoryCitation{},
+		} {
+			if err := tx.WithContext(ctx).
+				Where("tenant_id = ? AND subject_id = ?", scope.TenantID, scope.SubjectID).
+				Delete(model).Error; err != nil {
+				return err
+			}
 		}
-	}
-	return nil
+		return nil
+	})
 }

@@ -4016,7 +4016,7 @@ export default {
       masteryToggle: '지식 가이드',
       masteryToggleTitle: '지식 가이드 보기로 전환',
       exitMastery: '가이드 종료',
-      recommendNext: '계속 탐색 · 다음 추천',
+      recommendNext: '계속 탐색',
       profileEntry: '내 프로필',
       profileTitle: '지식 프로필',
       profileHint: '막대 높이는 10단계 습득도를, 색은 상태 구간을 나타냅니다. 프로필을 삭제하면 개인 지식 상태만 지워지며, 지식베이스 내용이나 다른 사용자에게는 영향을 주지 않습니다.',

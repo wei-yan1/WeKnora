@@ -251,6 +251,33 @@ type MasteryDailyBucket struct {
 	Seconds   int64 // effective seconds (viewing time, or credited spread time)
 }
 
+// NodeLedger is the per-node slice of the guidance ledgers: the rows that can
+// possibly affect one page's water level, and nothing else.
+//
+// It exists because the page-view endpoint echoes that page's fresh level after
+// every effective view, and reaching it through the graph's aggregation meant
+// reading the whole knowledge base — every cited document, every viewed page, the
+// subject's entire like history and every daily bucket in the KB — to answer about
+// one node. That made the cost of reading a page scale with the size of the
+// knowledge base and the length of the subject's history.
+//
+// Buckets arrive in the same folded shape as the KB-wide reads: recent days as one
+// row per (slug, day), older days summed per slug with an empty EventDate. Callers
+// stamp both from the same cutoff day, so they never need to be told apart.
+type NodeLedger struct {
+	// Citations are the rows of the documents this page is built from.
+	Citations []*MemoryCitation
+	// Likes are the subject's active likes, NOT narrowed to this node: the like
+	// snapshot is keyed by message and its document scope lives inside the
+	// allocations JSON, so there is no column to filter on. It is the one read here
+	// a single node cannot narrow — and the smallest of them, which is why the
+	// narrowing that matters (the daily buckets) still happens.
+	Likes         []*MemoryAnswerLike
+	View          *MemoryPageView // nil when the page has never been viewed
+	ViewBuckets   []MasteryDailyBucket
+	SpreadBuckets []MasteryDailyBucket
+}
+
 // MasteryNodeDetail is the per-node evidence breakdown surfaced by the profile
 // endpoint, so a user can see exactly which signals formed a node's water level.
 type MasteryNodeDetail struct {

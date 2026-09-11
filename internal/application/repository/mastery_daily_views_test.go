@@ -143,7 +143,7 @@ func TestListDailyViewsSplitsRecentAndCold(t *testing.T) {
 
 // 曝光去重按服务器本地日历日判定，与日桶的 event_date 同口径：
 // 昨天的展示不算「今天」，今天的展示才算。
-func TestHasExposureTodayUsesLocalDay(t *testing.T) {
+func TestListExposedTodayUsesLocalDay(t *testing.T) {
 	db, repo := newMasteryDedupDB(t, "mastery-exposure-day")
 	ctx := context.Background()
 	scope := interfaces.MemoryScope{TenantID: 7, SubjectID: "web_user:alice"}
@@ -173,19 +173,168 @@ func TestHasExposureTodayUsesLocalDay(t *testing.T) {
 	seed("entity/today", dayStart.Add(time.Minute))
 	seed("entity/yesterday", dayStart.Add(-time.Minute))
 
-	got, err := repo.HasExposureToday(ctx, scope, "kb-1", "entity/hub", "entity/today")
+	shown, err := repo.ListExposedToday(ctx, scope, "kb-1", "entity/hub")
 	if err != nil {
-		t.Fatalf("check today: %v", err)
+		t.Fatalf("list today's exposures: %v", err)
 	}
-	if !got {
+	if _, ok := shown["entity/today"]; !ok {
 		t.Errorf("当天展示过的候选应判定为已展示")
 	}
-
-	got, err = repo.HasExposureToday(ctx, scope, "kb-1", "entity/hub", "entity/yesterday")
-	if err != nil {
-		t.Fatalf("check yesterday: %v", err)
-	}
-	if got {
+	if _, ok := shown["entity/yesterday"]; ok {
 		t.Errorf("昨天的展示不应算作「今天」")
 	}
+}
+
+// bucketIndex 把一次日桶读归一成以日期为键的表，让两条读取路径的结果可以比较而
+// 不受行顺序影响；折叠行（EventDate 为空）保留为独立键，不去猜它代表哪一天。
+func bucketIndex(buckets []types.MasteryDailyBucket) map[string]types.MasteryDailyBucket {
+	out := make(map[string]types.MasteryDailyBucket, len(buckets))
+	for _, b := range buckets {
+		out[b.EventDate] = b
+	}
+	return out
+}
+
+// 单节点窄查询与全量读必须给出同一份证据。前者存在的唯一理由是省掉「为一个节点读
+// 整个知识库」，而不是换一套口径 —— 页面浏览回传的水位必须与图谱上显示的完全一致。
+// 这条把两条路径钉成同一个结果，否则将来收窄查询时会悄悄让两者分叉。
+func TestLoadNodeLedgerMatchesKnowledgeBaseRead(t *testing.T) {
+	_, repo := newMasteryDedupDB(t, "mastery-node-ledger")
+	ctx := context.Background()
+	scope := interfaces.MemoryScope{TenantID: 7, SubjectID: "web_user:alice"}
+	cutoff := time.Now().AddDate(0, 0, -30)
+
+	// 本节点：浏览一次、被来源文档引用、收到一个点赞，并被另一页的阅读预热。
+	if err := repo.BumpPageView(ctx, scope, "kb-1", "entity/acme", 5); err != nil {
+		t.Fatalf("view acme: %v", err)
+	}
+	if err := repo.BumpPageView(ctx, scope, "kb-1", "entity/other", 9); err != nil {
+		t.Fatalf("view other: %v", err)
+	}
+	if err := repo.BumpSpreadViews(ctx, scope, "kb-1", "entity/other",
+		[]string{"entity/acme", "entity/neighbour"}, 9); err != nil {
+		t.Fatalf("spread: %v", err)
+	}
+	if err := repo.BumpCitation(ctx, scope, []types.MemoryDocAffinity{
+		{KnowledgeID: "doc-a", KnowledgeBaseID: "kb-1"},
+		{KnowledgeID: "doc-z", KnowledgeBaseID: "kb-2"},
+	}); err != nil {
+		t.Fatalf("citation: %v", err)
+	}
+	if err := repo.RecordAnswerLike(ctx, scope, &types.MemoryAnswerLike{
+		MessageID: "msg-1",
+		Allocations: types.LikeAllocations{
+			{KnowledgeID: "doc-a", KnowledgeBaseID: "kb-1", CreditedWeight: 0.75},
+		},
+	}); err != nil {
+		t.Fatalf("like: %v", err)
+	}
+
+	narrow, err := repo.LoadNodeLedger(ctx, scope, "kb-1", "entity/acme", []string{"doc-a"}, cutoff)
+	if err != nil {
+		t.Fatalf("load node ledger: %v", err)
+	}
+
+	// 浏览行：窄查询只能拿到这一个 slug 的。
+	views, err := repo.ListPageViews(ctx, scope, "kb-1")
+	if err != nil {
+		t.Fatalf("list page views: %v", err)
+	}
+	if narrow.View == nil {
+		t.Fatalf("窄查询应返回本节点的浏览行")
+	}
+	if narrow.View.Slug != "entity/acme" {
+		t.Errorf("浏览行不应越界到其它 slug，got %q", narrow.View.Slug)
+	}
+	var wantView *types.MemoryPageView
+	for _, v := range views {
+		if v.Slug == "entity/acme" {
+			wantView = v
+		}
+	}
+	if wantView == nil ||
+		narrow.View.ViewCount != wantView.ViewCount ||
+		narrow.View.TotalDuration != wantView.TotalDuration ||
+		!narrow.View.LastViewAt.Equal(wantView.LastViewAt) {
+		t.Errorf("浏览行与全量读不一致：narrow=%+v want=%+v", narrow.View, wantView)
+	}
+
+	// 日桶：窄查询的结果必须等于全量读里属于本 slug 的那部分（含折叠行）。
+	recent, cold, err := repo.ListDailyViews(ctx, scope, "kb-1", cutoff)
+	if err != nil {
+		t.Fatalf("list daily views: %v", err)
+	}
+	wantViewBuckets := map[string]types.MasteryDailyBucket{}
+	for _, b := range append(append([]types.MasteryDailyBucket{}, recent...), cold...) {
+		if b.Slug == "entity/acme" {
+			wantViewBuckets[b.EventDate] = b
+		}
+	}
+	if !equalBucketIndex(bucketIndex(narrow.ViewBuckets), wantViewBuckets) {
+		t.Errorf("浏览日桶与全量读不一致：narrow=%v want=%v",
+			bucketIndex(narrow.ViewBuckets), wantViewBuckets)
+	}
+
+	// 预热日桶：同上，且必须排除另一个节点自己收到的那一份。
+	recentSpread, coldSpread, err := repo.ListDailySpread(ctx, scope, "kb-1", cutoff)
+	if err != nil {
+		t.Fatalf("list daily spread: %v", err)
+	}
+	wantSpreadBuckets := map[string]types.MasteryDailyBucket{}
+	for _, b := range append(append([]types.MasteryDailyBucket{}, recentSpread...), coldSpread...) {
+		if b.Slug == "entity/acme" {
+			wantSpreadBuckets[b.EventDate] = b
+		}
+	}
+	if len(wantSpreadBuckets) == 0 {
+		t.Fatalf("用例应至少为本节点产生一条预热桶")
+	}
+	if !equalBucketIndex(bucketIndex(narrow.SpreadBuckets), wantSpreadBuckets) {
+		t.Errorf("预热日桶与全量读不一致：narrow=%v want=%v",
+			bucketIndex(narrow.SpreadBuckets), wantSpreadBuckets)
+	}
+
+	// 引用行按来源文档收窄：只带 doc-a，不能把另一个知识库的 doc-z 也读进来。
+	citations, err := repo.ListCitations(ctx, scope, "kb-1")
+	if err != nil {
+		t.Fatalf("list citations: %v", err)
+	}
+	wantCitations := 0
+	for _, c := range citations {
+		if c.KnowledgeID == "doc-a" {
+			wantCitations++
+		}
+	}
+	if wantCitations == 0 {
+		t.Fatalf("用例应至少为本节点产生一条引用行")
+	}
+	if len(narrow.Citations) != wantCitations {
+		t.Errorf("引用行数不一致：narrow=%d want=%d", len(narrow.Citations), wantCitations)
+	}
+	for _, c := range narrow.Citations {
+		if c.KnowledgeID != "doc-a" {
+			t.Errorf("引用行不应包含来源之外的文档，got %q", c.KnowledgeID)
+		}
+	}
+
+	// 从未浏览过的页面：没有浏览行，日桶为空，而不是报错。
+	fresh, err := repo.LoadNodeLedger(ctx, scope, "kb-1", "entity/never", nil, cutoff)
+	if err != nil {
+		t.Fatalf("load untouched node: %v", err)
+	}
+	if fresh.View != nil || len(fresh.ViewBuckets) != 0 || len(fresh.SpreadBuckets) != 0 {
+		t.Errorf("未浏览过的节点不应带回任何证据：%+v", fresh)
+	}
+}
+
+func equalBucketIndex(a, b map[string]types.MasteryDailyBucket) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if w, ok := b[k]; !ok || w.Count != v.Count || w.Seconds != v.Seconds || w.Slug != v.Slug {
+			return false
+		}
+	}
+	return true
 }

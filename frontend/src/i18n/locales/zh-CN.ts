@@ -4018,7 +4018,7 @@ export default {
       masteryToggle: '知识引导',
       masteryToggleTitle: '切换到知识引导视图',
       exitMastery: '退出引导',
-      recommendNext: '继续探索 · 建议先看',
+      recommendNext: '继续探索',
       profileEntry: '个人画像',
       profileTitle: '个人知识画像',
       profileHint: '水位高度表示十档掌握程度，颜色表示状态区间。删除画像只清空你的个人知识状态，不影响知识库内容与其他用户。',

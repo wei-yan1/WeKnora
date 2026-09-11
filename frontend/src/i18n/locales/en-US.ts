@@ -3019,7 +3019,7 @@ export default {
       masteryToggle: 'Guide',
       masteryToggleTitle: 'Toggle knowledge guidance view',
       exitMastery: 'Exit guide',
-      recommendNext: 'Continue exploring · Suggested next',
+      recommendNext: 'Continue exploring',
       profileEntry: 'My profile',
       profileTitle: 'Knowledge profile',
       profileHint: 'Bar height shows the ten-level mastery; color shows the state band. Deleting your profile only clears your personal knowledge state — it does not affect knowledge base content or other users.',

@@ -256,7 +256,7 @@ r = alpha*p + (1-alpha) * A^T r    // alpha = 0.15, tolerance = 1e-8, maxIter = 
 5. **排序**：PPR 分数降序 → slug 升序兜底；
 6. **截断**：取 Top-K（默认 `DefaultBoundaryTopK = 12`）。
 
-输出的 `slug → score` 有两层用途：**分数 > 0** 表示「这个节点在边界上」（前端画涟漪），**分数本身**用于对一跳邻居排序（生成「建议先看」）。
+输出的 `slug → score` 有两层用途：**分数 > 0** 表示「这个节点在边界上」（前端画涟漪），**分数本身**用于对一跳邻居排序（生成抽屉里的「继续探索」推荐）。
 
 它同样是**纯函数**——输入相同，输出必然相同，可单测、可回放。
 
@@ -371,7 +371,7 @@ CreditedWeight = total * weights[i] / sum // 归一化后按份额分配
 1. **所有一跳邻居与连线**做轻微关系高亮——帮助理解结构；
 2. 其中**处于知识边界**（PPR 候选中、且当前水位低）的邻居，亮起**淡金色涟漪**——提示值得探索。
 
-同时，节点详情抽屉里给出**「继续探索 · 建议先看」**的 1~3 项明确推荐：
+同时，节点详情抽屉里给出**「继续探索」**的 1~3 项明确推荐：
 
 | 环节 | 规则 |
 |---|---|
@@ -429,6 +429,23 @@ CreditedWeight = total * weights[i] / sum // 归一化后按份额分配
 | **Grow Frontier**（沿前沿生长） | 一键 | 找出画面上所有仍带展开环的节点，并行发起请求、合并后重绘并保持布局——是 Bloom 的批量版本 |
 
 **这两条路径只改变「画布上有哪些节点」，不改变任何节点的水位或档位**，与知识引导层正交。
+
+### 3.6 视频演示
+
+<!-- 上传说明（此注释在页面上不显示）：
+     在 GitHub 网页上点开本文件的编辑模式，把视频文件拖到下面留空的行上，
+     GitHub 会自动上传并插入形如 https://github.com/user-attachments/assets/<hash> 的链接，
+     该链接在页面上会直接渲染成播放器。
+     两个视频：课题四_20M_1.mp4（8.8 MB）、课题四_20M_2.mp4（9.1 MB），均在 10 MB 以内。
+     视频文件不进仓库，避免 18 MB 永久占用 Git 历史。 -->
+
+**演示一**
+
+*（此处放置第一段录屏）*
+
+**演示二**
+
+*（此处放置第二段录屏）*
 
 ---
 
@@ -548,7 +565,7 @@ CreditedWeight = total * weights[i] / sum // 归一化后按份额分配
         └─ repo.MarkExposureQualified           若该 slug 曾是边界候选 → 回填合格浏览（闭环）
               │
 【回传】handler 组装响应
-        ├─ NodeStateForSlug(重算该节点最新状态)
+        ├─ NodeStateForSlug(重算该节点最新状态；窄查询，只读这一个节点的账本)
         └─ { success, mastery, recently_active, last_active }
               │
 【前端】applyFreshMastery(slug, mastery, recentlyActive)
@@ -563,6 +580,8 @@ CreditedWeight = total * weights[i] / sum // 归一化后按份额分配
 2. **邻居预热放在浏览写入成功之后**——避免「主证据写失败，却留下扩散痕迹」；
 3. **前端「先结算旧页、再启动新页」，且结算函数返回 Promise**——切回图谱前 `await` 它，避免「新页图谱先拉、旧页证据后写」的竞态。
 
+**回传的水位为什么必然等于地图上的球**：`NodeStateForSlug` **没有**复用图谱那次全量聚合——那样会为「一个节点」把整个知识库的账本读一遍（日桶更会随「页面数 × 天数」增长），而页面每读满一次就要回传一次。它改走一条**窄查询**：`LoadNodeLedger` 只读这个 slug 的浏览行与日桶、以及它来源文档的引用行；但**投影与档位映射用的是同一套函数**（`projectEvidence` + `stateFromEvidence` + `Level`）。所以两条路径不可能给出不同的数字——这与「画像与图谱共用同一次计算」是同一个保证（见 5.5）。
+
 ### 5.3 链路二：图谱是怎么算出来的（读路径）
 
 这是**计算量最大**的一条链路：要把整个知识库的所有页面算一遍水位。
@@ -575,7 +594,7 @@ CreditedWeight = total * weights[i] / sum // 归一化后按份额分配
         ├─ 收集 slugSources：页面 slug → 它引用的来源文档 id 列表
         └─ masteryService.NodeStates(ctx, kbID, slugSources)
               │
-【服务】service.go:288  NodeStates → aggregate()
+【服务】service.go:380  NodeStates → aggregate()
         │
         ├─ ① ResolveScope(ctx)                   租户 + 用户隔离
         ├─ ② 空 slugSources 提前返回              省掉后面四次账本查询
@@ -729,8 +748,8 @@ internal/router/routes_memory.go             ← 路由注册
 
 | 维度 | 规模 |
 |---|---|
-| 新增后端实现代码 | **2,639 行**（服务 987 / 仓储 552 / 类型·接口 409 / 接口层 691） |
-| 单元测试 | **44 个测试函数、1,153 行**（测试与实现比 ≈ 44%） |
+| 新增后端实现代码 | **3,061 行**（服务 1,124 / 仓储 790 / 类型·接口 445 / 接口层 702） |
+| 单元测试 | **45 个测试函数、1,375 行**（测试与实现比 ≈ 45%） |
 | 数据库迁移 | **8 组、16 个文件**（PostgreSQL 与 SQLite 双端同步） |
 | 新增数据表 | **6 张专用账本**，与检索重排数据完全解耦 |
 | 对外接口 | **8 个**（路径中不含 subject id，主体来自调用者身份） |
@@ -738,6 +757,12 @@ internal/router/routes_memory.go             ← 路由注册
 | 前端交互 | **7 个模块**（视图开关、水位球、水波、档位筛选、推荐、画像、图谱扩展） |
 | 可调常量 | 后端 11 个 + 前端 4 个，集中定义、双侧同步 |
 | 依赖新增 | **0**（不依赖 Neo4j，PostgreSQL 与桌面 Lite 均可运行） |
+
+> **规模口径（可复现）**：以上为 `git diff --numstat upstream/main -- <路径>` 的 added 行数。
+> 服务 = `internal/application/service/mastery/*.go`（不含测试）；仓储 = `internal/application/repository/mastery.go`；
+> 类型·接口 = `internal/types/mastery.go` + `internal/types/interfaces/mastery.go`；接口层 = `internal/handler/mastery.go`；
+> 测试 = `internal/application/service/mastery/*_test.go` + `internal/application/repository/mastery*_test.go`。
+> 不含 `wiki_page.go` 的接入改动、路由注册与容器装配。
 
 ### 6.2 八个接口
 
@@ -762,6 +787,7 @@ internal/router/routes_memory.go             ← 路由注册
 | PPR 边界 | 冷启动、低证据邻居命中、已熟悉节点排除 | 3 |
 | 同页去重 | 次数折叠、时长保留、跨用户隔离、日桶一致性 | 5 |
 | 日桶读取 | 分日读取、折叠规则、冷端切分 | 4 |
+| 账本读取一致性 | **单节点窄查询 vs 全库读取**：浏览行、浏览日桶、预热日桶、引用行逐项一致；未浏览过的页面返回空而非报错 | 1 |
 
 **回归测试的价值举例**：去重测试会断言「6 次重复浏览 → 次数为 1、时长为 30」。如果有人移除去重逻辑，`view_count` 会变成 6，测试立刻失败——这条断言就是「按天折叠」这个设计决策的守门人。
 

@@ -106,51 +106,112 @@ func (s *Service) RecordExposure(ctx context.Context, exp *types.MemoryGuideExpo
 	}
 }
 
-// aggregate loads the ledgers and projects them onto pages, returning the
-// evidence breakdown per slug. Citation and like evidence are recorded by
-// knowledge id, so they are projected onto pages via slugSources (from
-// WikiPage.SourceRefs); view evidence is recorded directly by slug.
-func (s *Service) aggregate(
-	ctx context.Context, kbID string, slugSources map[string][]string,
-) (map[string]Evidence, error) {
-	scope, err := memory.ResolveScope(ctx)
-	if err != nil {
-		return map[string]Evidence{}, nil
-	}
-	// 没有节点可投影时，证据一定为空：先返回，省掉四次账本查询。
-	if len(slugSources) == 0 {
-		return map[string]Evidence{}, nil
-	}
-
-	citations, err := s.repo.ListCitations(ctx, scope, kbID)
-	if err != nil {
-		return nil, err
-	}
-	views, err := s.repo.ListPageViews(ctx, scope, kbID)
-	if err != nil {
-		return nil, err
-	}
-	likes, err := s.repo.ListActiveLikes(ctx, scope)
-	if err != nil {
-		return nil, err
-	}
-	// 冷桶折叠：早于衰减地平线的日桶，每条都已经按 DecayFloor 衰减，因此可以按
-	// slug 合并成一条；地平线之内仍逐日保留，各付各的衰减。配置退化（无下限）
-	// 时地平线为 0，此时把 cutoff 放在纪元起点，等价于「全部逐日保留」。
-	now := time.Now()
-	cutoff := time.Unix(0, 0)
+// coldCutoff returns the bucket cutoff: days before it are folded per slug, and a
+// degenerate configuration (no decay floor) yields the epoch, i.e. "fold nothing".
+func (s *Service) coldCutoff() time.Time {
 	if horizon := s.config.ColdHorizon(); horizon > 0 {
-		cutoff = now.Add(-horizon)
+		return time.Now().Add(-horizon)
 	}
-	recentViews, coldViews, err := s.repo.ListDailyViews(ctx, scope, kbID, cutoff)
-	if err != nil {
-		return nil, err
-	}
-	recentSpread, coldSpread, err := s.repo.ListDailySpread(ctx, scope, kbID, cutoff)
-	if err != nil {
-		return nil, err
-	}
+	return time.Unix(0, 0)
+}
 
+// mergeBuckets concatenates a split daily read back into one list. Cold rows keep
+// their empty EventDate, which is how the parser recognises them.
+func mergeBuckets(recent, cold []types.MasteryDailyBucket) []types.MasteryDailyBucket {
+	if len(cold) == 0 {
+		return recent
+	}
+	out := make([]types.MasteryDailyBucket, 0, len(recent)+len(cold))
+	out = append(out, recent...)
+	out = append(out, cold...)
+	return out
+}
+
+// dailySlices parses folded daily reads into per-day slices, returning the number of
+// buckets it had to skip together with the first offending date. View and spread
+// evidence share this one parse point so the two ledgers cannot drift apart in shape
+// or folding rule.
+//
+// A bucket without a date of its own is a folded (cold) row: it is stamped with the
+// cutoff day, which is exact rather than approximate because every day it covers
+// already decays at DecayFloor.
+//
+// A bucket whose date cannot be parsed is skipped rather than failing the read, but
+// it is counted so the caller can warn once instead of per bucket. This is not
+// harmless dirty data: skipping a bucket silently zeroes neighbour warmth (which has
+// no lumped fallback at all) and quietly drops view slicing back to the lumped row.
+// The repository is responsible for normalizing the dialect rendering to YYYY-MM-DD.
+func dailySlices(
+	viewBuckets, spreadBuckets []types.MasteryDailyBucket, cutoff time.Time,
+) (
+	viewSlices map[string][]ViewSlice,
+	spreadSlices map[string][]SpreadSlice,
+	badDates int,
+	firstBadDate string,
+) {
+	// view 证据按天切片，供 Level 逐日衰减（理由见 ViewSlice 的类型注释）。
+	// 日桶由 BumpPageView 在每次浏览时写入，次数与时长与 memory_page_views 同口径。
+	viewSlices = make(map[string][]ViewSlice)
+	spreadSlices = make(map[string][]SpreadSlice)
+	appendView := func(b types.MasteryDailyBucket, day time.Time) {
+		viewSlices[b.Slug] = append(viewSlices[b.Slug], ViewSlice{
+			Day:      day,
+			Views:    b.Count,
+			Duration: b.Seconds,
+		})
+	}
+	appendSpread := func(b types.MasteryDailyBucket, day time.Time) {
+		spreadSlices[b.Slug] = append(spreadSlices[b.Slug], SpreadSlice{Day: day, Seconds: b.Seconds})
+	}
+	forEachBucket := func(
+		buckets []types.MasteryDailyBucket, onEach func(b types.MasteryDailyBucket, day time.Time),
+	) {
+		for _, b := range buckets {
+			day := cutoff
+			if b.EventDate != "" {
+				parsed, perr := time.ParseInLocation("2006-01-02", b.EventDate, time.Local)
+				if perr != nil {
+					badDates++
+					if firstBadDate == "" {
+						firstBadDate = b.EventDate
+					}
+					continue
+				}
+				day = parsed
+			}
+			onEach(b, day)
+		}
+	}
+	forEachBucket(viewBuckets, appendView)
+	forEachBucket(spreadBuckets, appendSpread)
+	return viewSlices, spreadSlices, badDates, firstBadDate
+}
+
+// warnBadBucketDates reports skipped buckets once per aggregation. Per-bucket
+// warnings would drown the log, and this is precisely the signal that the ledger's
+// date format changed.
+func warnBadBucketDates(ctx context.Context, badDates int, firstBadDate string) {
+	if badDates == 0 {
+		return
+	}
+	logger.Warnf(ctx, "mastery: skipped %d daily bucket(s) whose date could not be parsed "+
+		"(first %q); bucket dates must arrive normalized to YYYY-MM-DD", badDates, firstBadDate)
+}
+
+// projectEvidence builds the per-slug evidence from already-loaded ledger rows.
+//
+// It is shared by the KB-wide aggregation (the graph overlay) and the single-node
+// one (the page-view echo), and that sharing is the point: the echo exists to return
+// the same number the overlay shows, so the two must not be able to disagree about
+// how a signal becomes evidence.
+func projectEvidence(
+	slugSources map[string][]string,
+	citations []*types.MemoryCitation,
+	likes []*types.MemoryAnswerLike,
+	views []*types.MemoryPageView,
+	viewSlices map[string][]ViewSlice,
+	spreadSlices map[string][]SpreadSlice,
+) map[string]Evidence {
 	citeByDoc := make(map[string]*types.MemoryCitation, len(citations))
 	for _, c := range citations {
 		citeByDoc[c.KnowledgeID] = c
@@ -178,56 +239,6 @@ func (s *Service) aggregate(
 	viewBySlug := make(map[string]*types.MemoryPageView, len(views))
 	for _, v := range views {
 		viewBySlug[v.Slug] = v
-	}
-
-	// view 证据按天切片，供 Level 逐日衰减（理由见 ViewSlice 的类型注释）。
-	// 日桶由 BumpPageView 在每次浏览时写入，次数与时长与 memory_page_views 同口径。
-	viewSlices := make(map[string][]ViewSlice)
-	spreadSlices := make(map[string][]SpreadSlice)
-	appendView := func(b types.MasteryDailyBucket, day time.Time) {
-		viewSlices[b.Slug] = append(viewSlices[b.Slug], ViewSlice{
-			Day:      day,
-			Views:    b.Count,
-			Duration: b.Seconds,
-		})
-	}
-	appendSpread := func(b types.MasteryDailyBucket, day time.Time) {
-		spreadSlices[b.Slug] = append(spreadSlices[b.Slug], SpreadSlice{Day: day, Seconds: b.Seconds})
-	}
-	// 唯一的日期解析点，浏览与预热共用：近端桶自带日期；折叠桶（EventDate 为空）
-	// 取 cutoff 当天作代表——桶内每一天的衰减因子都已经是 DecayFloor，与逐日展开
-	// 完全等价。单个坏桶只跳过，不拖垮整张图的水位计算；坏桶数在四次遍历后汇总成
-	// 一条告警——逐桶刷 warning 会把日志淹掉，而它恰恰是「日桶格式变了」的信号。
-	badDates := 0
-	firstBadDate := ""
-	forEachBucket := func(
-		buckets []types.MasteryDailyBucket, onEach func(b types.MasteryDailyBucket, day time.Time),
-	) {
-		for _, b := range buckets {
-			day := cutoff
-			if b.EventDate != "" {
-				parsed, perr := time.ParseInLocation("2006-01-02", b.EventDate, time.Local)
-				if perr != nil {
-					badDates++
-					if firstBadDate == "" {
-						firstBadDate = b.EventDate
-					}
-					continue
-				}
-				day = parsed
-			}
-			onEach(b, day)
-		}
-	}
-	forEachBucket(recentViews, appendView)
-	forEachBucket(coldViews, appendView)
-	forEachBucket(recentSpread, appendSpread)
-	forEachBucket(coldSpread, appendSpread)
-	if badDates > 0 {
-		// 这不是「无关紧要的脏数据」：跳过整桶会让预热（无汇总兜底）静默归零、
-		// 让浏览切片悄悄退回汇总行。仓储层负责把方言渲染归一成 YYYY-MM-DD。
-		logger.Warnf(ctx, "mastery: skipped %d daily bucket(s) whose date could not be parsed "+
-			"(first %q); bucket dates must arrive normalized to YYYY-MM-DD", badDates, firstBadDate)
 	}
 
 	result := make(map[string]Evidence, len(slugSources))
@@ -263,7 +274,88 @@ func (s *Service) aggregate(
 		e.SpreadSlices = spreadSlices[slug]
 		result[slug] = e
 	}
-	return result, nil
+	return result
+}
+
+// aggregate loads the ledgers of a whole knowledge base and projects them onto
+// pages, returning the evidence breakdown per slug. Citation and like evidence are
+// recorded by knowledge id, so they are projected onto pages via slugSources (from
+// WikiPage.SourceRefs); view evidence is recorded directly by slug.
+//
+// This is the graph overlay's read: it needs every page of the KB. The page-view
+// echo must not use it — see nodeEvidence.
+func (s *Service) aggregate(
+	ctx context.Context, kbID string, slugSources map[string][]string,
+) (map[string]Evidence, error) {
+	scope, err := memory.ResolveScope(ctx)
+	if err != nil {
+		return map[string]Evidence{}, nil
+	}
+	// 没有节点可投影时，证据一定为空：先返回，省掉四次账本查询。
+	if len(slugSources) == 0 {
+		return map[string]Evidence{}, nil
+	}
+
+	citations, err := s.repo.ListCitations(ctx, scope, kbID)
+	if err != nil {
+		return nil, err
+	}
+	views, err := s.repo.ListPageViews(ctx, scope, kbID)
+	if err != nil {
+		return nil, err
+	}
+	likes, err := s.repo.ListActiveLikes(ctx, scope)
+	if err != nil {
+		return nil, err
+	}
+	cutoff := s.coldCutoff()
+	recentViews, coldViews, err := s.repo.ListDailyViews(ctx, scope, kbID, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	recentSpread, coldSpread, err := s.repo.ListDailySpread(ctx, scope, kbID, cutoff)
+	if err != nil {
+		return nil, err
+	}
+
+	viewSlices, spreadSlices, badDates, firstBadDate := dailySlices(
+		mergeBuckets(recentViews, coldViews), mergeBuckets(recentSpread, coldSpread), cutoff)
+	warnBadBucketDates(ctx, badDates, firstBadDate)
+
+	return projectEvidence(slugSources, citations, likes, views, viewSlices, spreadSlices), nil
+}
+
+// nodeEvidence loads just one page's ledgers and projects them into Evidence.
+//
+// The page-view endpoint echoes this page's fresh level after every effective view.
+// Reusing aggregate for that meant reading the whole knowledge base — every daily
+// bucket in it, a set that grows with pages × days — to answer about one node, so
+// the cost of reading a single page grew with the KB and with the subject's history.
+// Every read behind LoadNodeLedger is a point lookup bounded by this page.
+func (s *Service) nodeEvidence(
+	ctx context.Context, kbID, slug string, sourceKnowledgeIDs []string,
+) (Evidence, error) {
+	scope, err := memory.ResolveScope(ctx)
+	if err != nil || slug == "" {
+		return Evidence{}, nil
+	}
+	cutoff := s.coldCutoff()
+	ledger, err := s.repo.LoadNodeLedger(ctx, scope, kbID, slug, sourceKnowledgeIDs, cutoff)
+	if err != nil {
+		return Evidence{}, err
+	}
+	var views []*types.MemoryPageView
+	if ledger.View != nil {
+		views = []*types.MemoryPageView{ledger.View}
+	}
+	viewSlices, spreadSlices, badDates, firstBadDate := dailySlices(
+		ledger.ViewBuckets, ledger.SpreadBuckets, cutoff)
+	warnBadBucketDates(ctx, badDates, firstBadDate)
+
+	return projectEvidence(
+		map[string][]string{slug: sourceKnowledgeIDs},
+		ledger.Citations, ledger.Likes, views, viewSlices, spreadSlices,
+	)[slug], nil
 }
 
 // NodeMastery computes the water level per slug.
@@ -295,35 +387,37 @@ func (s *Service) NodeStates(
 	return s.statesFromEvidence(evidence, time.Now()), nil
 }
 
-// NodeStateForSlug returns the state of a single page, reusing the same
-// aggregation as NodeStates so the value echoed back after a page view matches
-// the graph overlay exactly.
+// NodeStateForSlug returns the state of a single page. It shares the projection and
+// the level mapping with NodeStates, so the value echoed back after a page view
+// matches the graph overlay exactly — without reading the whole knowledge base to
+// compute it.
 func (s *Service) NodeStateForSlug(
 	ctx context.Context, kbID, slug string, sourceKnowledgeIDs []string,
 ) (types.MasteryNodeState, error) {
-	states, err := s.NodeStates(ctx, kbID, map[string][]string{slug: sourceKnowledgeIDs})
+	e, err := s.nodeEvidence(ctx, kbID, slug, sourceKnowledgeIDs)
 	if err != nil {
 		return types.MasteryNodeState{}, err
 	}
-	if st, ok := states[slug]; ok {
-		return st, nil
+	return stateFromEvidence(s.config, e, time.Now()), nil
+}
+
+// stateFromEvidence derives one node's state. The multi-node and single-node reads
+// share it so neither can map evidence onto a level differently from the other.
+func stateFromEvidence(cfg Config, e Evidence, now time.Time) types.MasteryNodeState {
+	lastActive := e.LastActive()
+	return types.MasteryNodeState{
+		Level:          Level(cfg, e, now),
+		LastActive:     lastActive,
+		RecentlyActive: !lastActive.IsZero() && now.Sub(lastActive) <= time.Duration(cfg.FreshnessDays*24)*time.Hour,
 	}
-	return types.MasteryNodeState{Level: 0}, nil
 }
 
 func (s *Service) statesFromEvidence(
 	evidence map[string]Evidence, now time.Time,
 ) map[string]types.MasteryNodeState {
-	freshWindow := time.Duration(s.config.FreshnessDays*24) * time.Hour
 	result := make(map[string]types.MasteryNodeState, len(evidence))
 	for slug, e := range evidence {
-		lastActive := e.LastActive()
-		recent := !lastActive.IsZero() && now.Sub(lastActive) <= freshWindow
-		result[slug] = types.MasteryNodeState{
-			Level:          Level(s.config, e, now),
-			LastActive:     lastActive,
-			RecentlyActive: recent,
-		}
+		result[slug] = stateFromEvidence(s.config, e, now)
 	}
 	return result
 }
@@ -366,6 +460,21 @@ func (s *Service) Profile(
 // clicks a center node. Each candidate carries rank = index + 1 so the
 // click-through evaluation can answer "which position did the user follow".
 // Deduplicated per (kb, trigger, candidate, day).
+//
+// One read and one write, for the whole ripple. It used to ask "has this candidate
+// been shown today?" once per candidate and insert each one separately, so a node
+// click cost two round trips per candidate. A ripple is the drawer's shortlist —
+// at most three candidates, see the frontend's computeRecommendations — so that was
+// up to six round trips for one click.
+//
+// The read now decides whether the whole ripple is recorded: if it fails, the ripple
+// is dropped rather than written in part. A partial write is not *detectably*
+// partial — the ranks it did record stay self-consistent, so a consumer cannot tell
+// it from a legitimately shorter shortlist, and the distortion is silent. Recording
+// nothing lands in the "no exposure today" state the consumer already handles. Both
+// outcomes bias the click-through rate; only one of them is indistinguishable from
+// real data. (Nothing consumes this log yet — see §6.4 — so the choice currently
+// affects the quality of the future replay, not any live metric.)
 func (s *Service) RecordExposures(ctx context.Context, kbID, triggerSlug string, candidates []string) {
 	if kbID == "" || len(candidates) == 0 {
 		return
@@ -374,28 +483,42 @@ func (s *Service) RecordExposures(ctx context.Context, kbID, triggerSlug string,
 	if err != nil {
 		return
 	}
+	shown, err := s.repo.ListExposedToday(ctx, scope, kbID, triggerSlug)
+	if err != nil {
+		logger.Warnf(ctx, "mastery: list today's exposures failed: %v", err)
+		return
+	}
+	// 一次涟漪共用一个时间戳：同批展示的候选在评估里应当属于同一时刻。
+	shownAt := time.Now()
+	batch := make([]*types.MemoryGuideExposure, 0, len(candidates))
+	// 候选自身也要去重：首次出现的位置保留了更好的位次，而批量插入不应把同一个
+	// 候选写两遍。这与按天去重叠加后，与逐条写入的旧行为一致。
+	seen := make(map[string]struct{}, len(candidates))
 	for i, slug := range candidates {
 		if slug == "" {
 			continue
 		}
-		dup, err := s.repo.HasExposureToday(ctx, scope, kbID, triggerSlug, slug)
-		if err != nil {
-			logger.Warnf(ctx, "mastery: check exposure dup failed: %v", err)
+		if _, dup := shown[slug]; dup {
 			continue
 		}
-		if dup {
+		if _, dup := seen[slug]; dup {
 			continue
 		}
-		if err := s.repo.RecordExposure(ctx, scope, &types.MemoryGuideExposure{
+		seen[slug] = struct{}{}
+		batch = append(batch, &types.MemoryGuideExposure{
 			KnowledgeBaseID: kbID,
 			TriggerSlug:     triggerSlug,
 			CandidateSlug:   slug,
 			Strategy:        types.GuideStrategyPPRBoundary,
 			Rank:            i + 1,
-			ShownAt:         time.Now(),
-		}); err != nil {
-			logger.Warnf(ctx, "mastery: record exposure failed: %v", err)
-		}
+			ShownAt:         shownAt,
+		})
+	}
+	if len(batch) == 0 {
+		return
+	}
+	if err := s.repo.RecordExposureBatch(ctx, scope, batch); err != nil {
+		logger.Warnf(ctx, "mastery: record exposures failed: %v", err)
 	}
 }
 

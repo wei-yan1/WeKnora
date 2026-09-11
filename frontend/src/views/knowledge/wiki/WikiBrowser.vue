@@ -196,7 +196,7 @@
             </div>
             <div v-if="masteryEnabled && graphRecommendations.length > 0" class="wiki-drawer-recommendations" style="margin-bottom: 16px;">
               <div class="wiki-drawer-recommendations-title">
-                {{ $t('knowledgeEditor.wikiBrowser.recommendNext') || '继续探索 · 建议先看' }}
+                {{ $t('knowledgeEditor.wikiBrowser.recommendNext') || '继续探索' }}
               </div>
               <div class="wiki-drawer-recommendations-list">
                 <button

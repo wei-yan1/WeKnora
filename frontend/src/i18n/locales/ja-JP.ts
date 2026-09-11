@@ -3019,7 +3019,7 @@ export default {
       masteryToggle: '知識ガイド',
       masteryToggleTitle: '知識ガイドビューに切り替える',
       exitMastery: 'ガイドを終了',
-      recommendNext: '探索を続ける · 次に見るなら',
+      recommendNext: '探索を続ける',
       profileEntry: 'マイプロフィール',
       profileTitle: '知識プロフィール',
       profileHint: 'バーの高さは 10 段階の習得度、色は状態の区分を表します。プロフィールを削除しても個人の知識状態だけが消去され、ナレッジベースの内容や他のユーザーには影響しません。',
