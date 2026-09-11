@@ -818,7 +818,7 @@ OpenSession(config):
 
 ## 十、实机测试演示视频
 
-以下是五类扩展点插件在 Docker 部署与快速开发模式下的实机测试录像（共 7 段）：
+以下是五类扩展点插件在 Docker 部署与快速开发模式下的实机测试录像（共 8 段）：
 
 - `
 https://github.com/user-attachments/assets/5a8588c0-5fba-4f31-b7b5-a48e087e1341
@@ -840,4 +840,9 @@ https://github.com/user-attachments/assets/c7ae3364-633c-4b3a-810a-c82c661d5dba
 
 
 https://github.com/user-attachments/assets/7e451b7d-0806-437a-ac63-284dcf427da6
+
+
+https://github.com/user-attachments/assets/535174a8-6fe8-4ad5-a35b-5bcd55d1ce64
+
+
 
