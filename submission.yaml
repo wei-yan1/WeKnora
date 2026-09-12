@@ -1,0 +1,15 @@
+version: 1
+student:
+  name: "蓝冠伟"
+  github_id: "wei-yan"
+topic:
+  id: "1"
+  title: "扩展能力插件化框架"
+result:
+  type: code
+  url: "https://github.com/wei-yan1/WeKnora/tree/rhino-2026-final-1"
+repository:
+  url: "https://github.com/wei-yan1/WeKnora.git"
+  branch: "codex/plugin-framework"
+  commit: "7c32ffe6d722c0db249ddf190f9f5c29cada352c"
+  tag: "rhino-2026-final-1"
