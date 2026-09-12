@@ -897,6 +897,18 @@ make dev-frontend
 
 插件目录由 `WEKNORA_PLUGIN_DIR_{datasource,parser,search,model,retriever}` 指定（见第五节）；安装与配置详见 [README_CN.md](README_CN.md)。
 
+**接入独立插件仓库（推荐方式）**：插件不在主仓中，而是维护在独立仓库 [WeKnora-plugin](https://github.com/wei-yan1/WeKnora-plugin)，其顶层目录名（`datasource/`、`parser/`、`search/`、`model/`、`retriever/`）与容器内的默认插件路径一一对应。因此**把插件仓库的根目录直接挂载进去即可**，不需要把插件复制进主仓：
+
+```bash
+# .env
+WEKNORA_PLUGIN_HOST_DIR=../WeKnora-plugin   # 宿主侧：插件仓库根目录（WSL 下形如 /mnt/d/WeKnora-plugin）
+WEKNORA_PLUGIN_MOUNT_DIR=/app/plugins       # 容器内挂载点，须与 WEKNORA_PLUGIN_DIR_* 的前缀一致
+```
+
+挂载后，容器内 `/app/plugins/datasource` 等路径就是插件仓库的同类目录，`WEKNORA_PLUGIN_DIR_*` 保持默认值即可。也可以把插件二进制放进主仓的 `plugins/<type>/` 后再挂载——该目录已随仓库保留占位说明文件，**未安装任何插件时同样能正常启动**（目录存在但没有插件，是合法的运行状态；目录不存在则会在启动时 panic）。
+
+> **容器不会替插件编译。** ProcessRuntime 形态要求插件目录内已有 **Linux/amd64** 可执行文件，需先在插件仓库内构建：`CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o <插件名> .`；isolated 形态则用插件目录内的 `Dockerfile` 构建镜像，并把镜像引用写进 `plugin.yaml` 的 `entrypoint`。只挂载源码而没有可执行文件时，宿主能发现 `plugin.yaml` 但装载会失败（日志中可见）。
+
 ### 13.2 测试
 
 ```bash
