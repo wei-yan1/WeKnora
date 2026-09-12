@@ -314,7 +314,7 @@ OnFetchAllStream: func(ctx context.Context, req pluginapi.Request, emit func(plu
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `Error` | `string` | 错误信息，非空表示失败 |
+| `Error` | `string` | 致命错误信息，非空即整批失败（**不要用它上报单条失败**，见 3.6） |
 | `Resources` | `[]Resource` | 资源列表（`ListResources` 返回） |
 | `Ancestors` | `[]string` | 祖先 ExternalID 列表（`ResolveResourceAncestors` 返回） |
 | `Items` | `[]FetchedItem` | 拉取的文档条目 |
@@ -342,7 +342,7 @@ OnFetchAllStream: func(ctx context.Context, req pluginapi.Request, emit func(plu
 | `URL` | `string` | 原始 URL（仅 URL 无内容时用） |
 | `MIMEType` | `string` | MIME 类型 |
 | `UpdatedAt` | `string` | 最后更新时间（RFC3339） |
-| `Metadata` | `map[string]string` | 元数据（来源、作者等） |
+| `Metadata` | `map[string]string` | 元数据（来源、作者等）；单条抓取失败时用 `error` 键上报占位条目（见 3.6） |
 | `IsDeleted` | `bool` | 标记删除（增量同步） |
 | `ReplacesSubtree` | `bool` | 用本次返回项整体替换某子树 |
 | `SubtreeKeep` | `[]string` | 子树替换时要保留的子项 ExternalID |
@@ -361,15 +361,35 @@ OnFetchAllStream: func(ctx context.Context, req pluginapi.Request, emit func(plu
 
 `FetchIncremental` / `OnFetchIncremental` 一次调用返回 `items + cursor + 错误`。宿主按下表处理，插件作者务必对齐：
 
-| 返回形状 | 插件侧表达 | 宿主行为 |
-|---|---|---|
-| 成功 | 返回 `Items` + `Cursor`，错误为 nil | 处理全部 items，持久化 cursor，同步标记为成功 |
-| 致命失败 | 返回非空错误（`Response.Error` 或 Go error） | **丢弃本次 items、不推进 cursor**，任务判失败并按重试策略重跑 |
+| 返回形状 | 插件侧表达 | 宿主行为 | cursor |
+|---|---|---|---|
+| 成功 | 返回 `Items` + `Cursor`，`Error` 为空 | 处理全部 items，同步记 `success` | 推进 |
+| 单条失败（可继续） | 在 `Items` 中放**占位条目**：`Metadata["error"]` 非空，且 `Content`、`URL` **均为空** | 该条计入失败数并写入同步日志的错误样本，**其余条目照常入库**，同步记 `partial` | **不推进**，下轮自动重试 |
+| 全部失败 | 每个需同步的条目都按上一行方式返回占位条目 | 同步直接判 `failed` | **不推进** |
+| 致命失败 | `Response.Error` 非空 | **丢弃本次 items、不推进 cursor**，任务判失败并按重试策略重跑 | 不推进 |
 
 要点：
 
-1. **致命失败时不要指望 cursor 被保存**：此时宿主不处理 items、也不保存 cursor；即使插件“顺便”返回了 cursor 和部分 items，也会被一并丢弃。这是为了避免把未处理的文档推进到 cursor 之后、造成永久漏同步。
-2. **协议只区分「成功 / 致命失败」两态**：v1 unary 协议没有独立的“部分成功”返回。插件若要表达“部分资源成功、部分失败”，应把整体作为致命失败返回错误（宁可整体重试，也不静默漏数据）。`Response.Warnings` 字段当前不会被宿主消费，不能依赖它上报部分失败。
+1. **部分失败用「占位条目」，不要把整体作为致命失败返回。** 这是宿主真正消费、内置连接器（语雀 / 飞书）普遍使用的通道：某篇文档抓取失败时，只为它生成一个带 `Metadata["error"]` 的空内容占位条目、继续同步其余文档，而不是中断整批。只有「一个都取不到」这类无法降级的情形才用 `Error` 致命失败。
+
+   SDK 已经提供构造器，直接调用即可——它保证 `Content` 与 `URL` 为空，避免手写时漏掉触发条件：
+
+   ```go
+   // 单条失败：计入失败数，其余条目照常同步，下轮自动重试该条
+   items = append(items, pluginapi.FailedItem(docID, doc.Title, err.Error()))
+
+   // 需要前端按语言本地化时，附带稳定的 i18n code 与参数
+   items = append(items, pluginapi.FailedItemWithReason(
+       docID, doc.Title, err.Error(), "feishu_api_error", "1663"))
+   ```
+
+   对应的 metadata 键由 SDK 导出为常量（`pluginapi.MetadataKeyError`、`MetadataKeyErrorReasonCode`、`MetadataKeyErrorReasonCodeValue`、`MetadataKeyErrorReason`），不需要手写字符串。
+2. **占位条目的触发条件很严格**：必须 `Content` 与 `URL` **都为空**，且 `Metadata["error"]` 存在，宿主才会把它计为失败。若把错误信息塞进 `Content`，该条会被当成正常文档入库；若只留一个空条目而不带 `Metadata["error"]`，则会被静默计为 `Skipped`（两类都造成漏报）。
+3. **占位条目必须携带稳定的 `ExternalID`**：失败会让宿主保留上一轮 cursor，下一轮重新拉取同一批变更（含本批已成功的条目，见 3.7 的 at-least-once），日志与重试都依赖该 ID 定位。
+4. **错误样本可结构化**：`Metadata["error"]` 作为兜底原文；若同时提供 `error_reason_code`（稳定的 i18n code）、`error_reason_code_value`、`error_reason`，宿主会以 code + 参数形式记录，前端可按语言本地化展示（内置飞书连接器即如此），原始状态码与响应体只留在服务端日志。
+5. **流式路径同理**：`emit` 出的占位条目同样计入失败计数；若整批条目全部失败，宿主会丢弃已 checkpoint 的 cursor，下一轮从头重试。
+6. **致命失败时不要指望 cursor 被保存**：此时宿主不处理 items、也不保存 cursor；即使插件“顺便”返回了 cursor 和部分 items，也会被一并丢弃。这是为了避免把未处理的文档推进到 cursor 之后、造成永久漏同步。
+7. **`Response.Warnings` 不参与判定**：该字段当前不被宿主消费，不能用它上报部分失败。进程内连接器另有 `PartialFetchError` 通道（宿主将其降级为告警、继续处理，并以 `partial` 呈现），但该通道**不在 gRPC 协议内，进程外插件无法使用**——插件表达部分失败的唯一方式是上一表的「单条失败（可继续）」。
 
 ### 3.7 一致性边界（插件作者须知）
 
@@ -424,7 +444,7 @@ D:\weknora-plugins\datasource\
 - 使用 ProcessRuntime 时，插件作为宿主进程的**子进程**运行，共享宿主的网络命名空间。因此它不具备操作系统级的网络隔离能力；需要联网的插件应确认运行环境允许其声明的网络策略。`DockerRuntime` 始终使用 `--network none`；若 OCI 插件声明受控联网策略，宿主会为该插件启动独立的 Unix Socket 出口代理，插件只能通过代理访问经策略允许的公网目标。
 - `go.mod` 里的 `replace github.com/Tencent/WeKnora => ../..` 这类路径在 Windows 和 WSL 间不通用；若需跨环境构建，建议改用相对路径（如 `../../../WeKnora-fork`）或发布版 SDK 依赖，避免构建环境差异导致编译失败。
 
-第三方作者可以使用 SDK 的 `pluginapi.RunDataSourceConformance` 对已经连接的 gRPC client 做握手、健康、校验、全量和增量接口的冒烟测试。该函数签名要求分别传入控制面 client（`PluginControlClient`，负责握手与健康检查）和业务 client（`DataSourcePluginClient`，负责校验/同步），两个 client 共享同一个 gRPC 连接。集成测试还应检查：首次同步能够导入预期项目，源端只变更一个项目时插件只返回该项目，删除项目时按约定返回删除标记。
+第三方作者可以使用 SDK 的 `pluginapi.RunDataSourceConformance` 对已经连接的 gRPC client 做握手、健康、校验、全量和增量接口的冒烟测试。该函数签名要求分别传入控制面 client（`PluginControlClient`，负责握手与健康检查）和业务 client（`DataSourcePluginClient`，负责校验/同步），两个 client 共享同一个 gRPC 连接。集成测试还应检查：首次同步能够导入预期项目，源端只变更一个项目时插件只返回该项目，删除项目时按约定返回删除标记；单条抓取失败时返回带 `Metadata["error"]` 的占位条目、且不中断整批（见 3.6）。
 
 流式插件还应验证：同步过程中收到多个响应批次；每个 cursor 都能被重新传给插件；在 checkpoint 后模拟进程中断，重启后不会重复处理已经确认的项目，也不会漏掉未确认项目。
 

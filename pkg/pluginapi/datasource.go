@@ -39,6 +39,58 @@ type FetchedItem struct {
 	ReplacesSubtree bool              `json:"replaces_subtree,omitempty"`
 	SubtreeKeep     []string          `json:"subtree_keep,omitempty"`
 }
+
+// Metadata keys the host reads on a FetchedItem. They are part of the wire
+// contract: build failure placeholders with the helpers below instead of
+// assembling the map by hand, so the host's classification cannot be missed.
+const (
+	// MetadataKeyError marks a per-item failure placeholder. The host counts the
+	// item as Failed, records a user-facing error sample, and keeps the previous
+	// cursor so the next run retries the same batch instead of silently skipping
+	// the document. The item MUST carry neither Content nor URL — when either is
+	// set the host ingests it as an ordinary document (see
+	// docs/plugin-development-datasource.md §3.6).
+	MetadataKeyError = "error"
+	// MetadataKeyErrorReasonCode is an optional stable i18n code. When present
+	// the host records code + params and the frontend localises the message.
+	MetadataKeyErrorReasonCode = "error_reason_code"
+	// MetadataKeyErrorReasonCodeValue is the single interpolation param for that
+	// code (e.g. an upstream status code).
+	MetadataKeyErrorReasonCodeValue = "error_reason_code_value"
+	// MetadataKeyErrorReason is the human-readable fallback shown when the
+	// frontend does not know the code.
+	MetadataKeyErrorReason = "error_reason"
+)
+
+// FailedItem builds a per-item failure placeholder. Use it when a single
+// resource could not be fetched but the rest of the batch should still sync:
+// the host counts this item as failed, keeps the batch going, and retries it on
+// the next run. Content and URL are deliberately left empty — that emptiness is
+// what tells the host this is a failure rather than a document. Return
+// Response.Error only when nothing could be fetched at all (see §3.6).
+func FailedItem(externalID, title, message string) FetchedItem {
+	return FetchedItem{
+		ExternalID: externalID,
+		Title:      title,
+		Metadata:   map[string]string{MetadataKeyError: message},
+	}
+}
+
+// FailedItemWithReason is FailedItem plus a stable i18n reason code, so the
+// host records a structured, localisable error instead of the raw upstream
+// message. Empty reasonCode/reasonValue are omitted rather than stored blank.
+func FailedItemWithReason(externalID, title, message, reasonCode, reasonValue string) FetchedItem {
+	item := FailedItem(externalID, title, message)
+	item.Metadata[MetadataKeyErrorReason] = message
+	if reasonCode != "" {
+		item.Metadata[MetadataKeyErrorReasonCode] = reasonCode
+	}
+	if reasonValue != "" {
+		item.Metadata[MetadataKeyErrorReasonCodeValue] = reasonValue
+	}
+	return item
+}
+
 type Request struct {
 	Config      map[string]any `json:"config,omitempty"`
 	ResourceIDs []string       `json:"resource_ids,omitempty"`

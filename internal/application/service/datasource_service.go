@@ -992,6 +992,17 @@ func (s *DataSourceService) applyFetchedItem(
 		return
 	}
 
+	if errMsg, hasErr := item.Metadata["error"]; hasErr && errMsg != "" {
+		// The item carries a failure marker but also has content or a URL, so the
+		// branch above did not classify it as failed: it is about to be ingested
+		// as an ordinary document. Plugins should build placeholders with
+		// pluginapi.FailedItem, which leaves both fields empty; a hand-rolled item
+		// that fills either silently hides the failure. Warn so the mistake shows
+		// up in logs instead of as a document whose body is an error message.
+		logger.Warnf(ctx, "item %q (external_id=%s) carries Metadata[\"error\"] (%s) but also content/url; ingesting it as a normal document — failure placeholders must leave Content and URL empty (see docs/plugin-development-datasource.md 3.6)",
+			item.Title, item.ExternalID, errMsg)
+	}
+
 	isUpdate, err := s.ingestItem(ctx, ds, item, tagIDs)
 	if err != nil {
 		var dupErr *types.DuplicateKnowledgeError
