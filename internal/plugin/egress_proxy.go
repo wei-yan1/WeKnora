@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -101,7 +102,9 @@ func (p *EgressProxy) Stop(ctx context.Context) error {
 		stopErr = server.Shutdown(ctx)
 	}
 	if ln != nil {
-		if err := ln.Close(); err != nil && stopErr == nil {
+		// server.Shutdown already closes the listener, so a second Close on the
+		// normal path returns net.ErrClosed; only surface real close errors.
+		if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) && stopErr == nil {
 			stopErr = err
 		}
 	}
