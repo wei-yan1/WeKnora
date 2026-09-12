@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS sync_logs (
     started_at      DATETIME,
     finished_at     DATETIME,
     error_message   TEXT,
+    task_id         VARCHAR(255) NOT NULL DEFAULT '',
+    task_payload    TEXT,
     created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP
 );
